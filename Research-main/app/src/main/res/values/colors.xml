@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Recovered from the shipped APK so the launcher icon and splash keep the
+         exact colours the handed-out build used. -->
+    <color name="app_bg">#f4f6fa</color>
+    <color name="splash_bg">#0b1220</color>
+    <color name="ic_launcher_background">#0b1220</color>
+</resources>

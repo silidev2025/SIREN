@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SIREN</string>
+    <string name="alert_channel_name">Earthquake alerts</string>
+    <string name="alert_channel_desc">Full-screen seismic alerts from the campus sensor network</string>
+</resources>

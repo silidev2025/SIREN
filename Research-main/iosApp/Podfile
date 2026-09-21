@@ -1,0 +1,22 @@
+# Firebase for iOS. Run `pod install` on a Mac, then open iosApp.xcworkspace
+# (NOT iosApp.xcodeproj).
+#
+# iOS 15 is the floor: Compose Multiplatform needs 13+, the Firebase iOS SDK needs 15+.
+platform :ios, '15.0'
+
+target 'iosApp' do
+  use_frameworks!
+
+  pod 'FirebaseCore'
+  pod 'FirebaseAuth'
+  pod 'FirebaseFirestore'
+  pod 'FirebaseMessaging'
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+    end
+  end
+end

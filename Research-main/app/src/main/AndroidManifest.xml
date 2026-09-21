@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- The alarm plays from a foreground service so it survives the app being
+         backgrounded, which is exactly when an earthquake alarm matters most. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Android 14+ restricts this to calling/alarm apps. If it is denied the
+         full-screen alert never appears, so the notification actions on the alarm
+         service are the required fallback. Settings → "Full-screen alerts" reports
+         the current grant and links straight to the OS screen that changes it. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Nothing is ever drawn over another app. This is requested solely because it is
+         the one documented exemption from the Android 10+ ban on background activity
+         starts, which is what lets SirenAlarmService raise the alert screen itself on the
+         phones where USE_FULL_SCREEN_INTENT above is denied. Optional, never requested at
+         first launch, and the notification actions still work without it. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Lets the alarm keep sounding through a Doze window. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Texts a student's linked guardians when they tap "I need help". Requested at that
+         moment, not at launch, and the app records the response either way if it is
+         refused. SMS is here because it survives what the Firestore path does not: a
+         guardian whose phone is locked, whose app is not installed, or who has no data
+         after an earthquake. Note this permission is restricted on Google Play and would
+         need a declared exception if this app were ever published there. -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <!-- SEND_SMS implies a REQUIRED android.hardware.telephony feature, which would make the
+         app uninstallable on Wi-Fi-only tablets — devices a teacher or parent may well be
+         using to watch the roll call. The alert, alarm and Firestore paths need no telephony
+         at all; only the guardian SMS does, and it degrades to a reported failure. -->
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
+    <application
+        android:name=".SirenApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SIREN">
+
+        <!-- showWhenLocked/turnScreenOn are set here as well as in code: the manifest
+             attributes apply to the launch itself, which is what a full-screen intent
+             on a dark, locked phone needs. Setting them only in onCreate is too late. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.SIREN.Starting">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Lives in the :shared library; merged into the app at build time. -->
+        <service
+            android:name="com.siren.mobile.notify.SirenAlarmService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".notify.SirenMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="siren_alerts" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/splash_bg" />
+    </application>
+
+</manifest>

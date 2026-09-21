@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Seismograph brand mark: three rising bars resolving into a seismic trace.
+  Drawn in black and tinted at the call site so it follows the theme.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="128dp"
+    android:height="64dp"
+    android:viewportWidth="128"
+    android:viewportHeight="64">
+
+    <!-- rising bars -->
+    <path
+        android:pathData="M14,26 L14,38"
+        android:strokeColor="#000000"
+        android:strokeWidth="8"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M28,17 L28,47"
+        android:strokeColor="#000000"
+        android:strokeWidth="8"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M42,7 L42,57"
+        android:strokeColor="#000000"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+
+    <!-- seismic trace -->
+    <path
+        android:pathData="M52,32 L58,32 L64,13 L71,52 L77,22 L83,41 L89,32 L116,32"
+        android:fillColor="#00000000"
+        android:strokeColor="#000000"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

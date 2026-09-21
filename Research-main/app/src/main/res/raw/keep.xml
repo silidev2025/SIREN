@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The release build runs `isShrinkResources = true`, and the shrinker could not see
+  siren_alarm as reachable: the only reference is R.raw.siren_alarm handed into
+  AndroidPlatformServices and stashed in a static on the alarm service, which the
+  static analysis does not follow. Without this the audio is dropped from the release
+  APK and the emergency alarm plays SILENTLY — while working perfectly in debug.
+
+  Verify after any change to shrinking:
+      the release APK must contain res/raw/siren_alarm.mp3
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@raw/siren_alarm" />

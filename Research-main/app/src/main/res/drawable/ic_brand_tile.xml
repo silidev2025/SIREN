@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The decompiled copy referenced an aapt-inlined gradient ($ic_brand_tile__0);
+     it is restored here as a proper <aapt:attr> block. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="128dp"
+    android:height="128dp"
+    android:viewportWidth="128"
+    android:viewportHeight="128">
+
+    <path android:pathData="M28,0 h72 a28,28 0 0 1 28,28 v72 a28,28 0 0 1 -28,28 h-72 a28,28 0 0 1 -28,-28 v-72 a28,28 0 0 1 28,-28 z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="128"
+                android:endY="128"
+                android:startColor="#3b82f6"
+                android:endColor="#1d4ed8" />
+        </aapt:attr>
+    </path>
+
+    <path
+        android:pathData="M64,62 m-46,0 a46,46 0 1,0 92,0 a46,46 0 1,0 -92,0"
+        android:fillColor="#00000000"
+        android:strokeColor="#ffffff"
+        android:strokeWidth="2.5"
+        android:strokeAlpha="0.28" />
+    <path
+        android:pathData="M64,62 m-34,0 a34,34 0 1,0 68,0 a34,34 0 1,0 -68,0"
+        android:fillColor="#00000000"
+        android:strokeColor="#ffffff"
+        android:strokeWidth="2.5"
+        android:strokeAlpha="0.45" />
+
+    <path
+        android:pathData="M64,36 L88,47 v20 c0,17 -10,28.5 -24,34 c-14,-5.5 -24,-17 -24,-34 V47 Z"
+        android:fillColor="#ffffff" />
+    <path
+        android:pathData="M52,64 h6 l4,-9 5,17 4,-11 3,5 h8"
+        android:fillColor="#00000000"
+        android:strokeColor="#1d4ed8"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

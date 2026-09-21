@@ -1,0 +1,255 @@
+===============================================================================
+ SIREN MOBILE - SETUP GUIDE  (rebuild, v2.4.0)
+ Seismic Integrated Response and Emergency Notification
+ City of Bogo Senior High School - Practical Research 2
+===============================================================================
+
+ Project folder : C:\Users\Administrator\Desktop\Project
+ Firebase proj  : quicktrip-fe547
+ App package    : com.research.siren   (code namespace: com.siren.mobile)
+ Old built APKs : C:\Users\Administrator\Desktop\SIREN-APK\
+
+-------------------------------------------------------------------------------
+ WHAT CHANGED FROM THE OLD GUIDE  -- READ THIS FIRST
+-------------------------------------------------------------------------------
+
+ The original project folder was lost. This project was rebuilt from the
+ decompiled APK plus the Kotlin/Compose prototype. Three things are different:
+
+ 1. SIGN-IN IS NOW EMAIL/PASSWORD, NOT ANONYMOUS.
+    The old guide told you to enable "Anonymous" in Firebase. That is no longer
+    used. Enable Email/Password instead (section 2.1). Anonymous accounts were
+    lost whenever a phone reinstalled the app, which broke parent-student links
+    and the alert history.
+
+ 2. THE RELEASE SIGNING KEY IS NEW.
+    siren-release.jks could not be recovered. A new key was generated. Any phone
+    still holding the old SIREN-v1.0-release.apk MUST UNINSTALL IT FIRST -
+    Android will not update an app whose signing key changed.
+
+ 3. VERSION IS NOW 2.4.0 (versionCode 2), matching the prototype.
+
+-------------------------------------------------------------------------------
+ SECTION 1 - WHAT IS ALREADY SET UP ON THIS COMPUTER
+-------------------------------------------------------------------------------
+
+ [x] Android Studio             C:\Program Files\Android\Android Studio
+ [x] Android SDK (platform 37)  C:\Users\Administrator\AppData\Local\Android\Sdk
+ [x] Portable JDK 17            C:\siren_toolchain\jdk-17.0.20+8
+ [x] Gradle 9.6.1 wrapper       in the project folder (gradlew.bat)
+ [x] google-services.json       app\google-services.json
+ [x] Release keystore           siren-release.jks + keystore.properties
+ [x] App source code            shared\src\commonMain\kotlin\com\siren\mobile\
+ [x] Android host (3 files)     app\src\main\java\com\siren\mobile\
+ [x] 28 safety-guide icons      shared\src\commonMain\composeResources\drawable\
+ [x] Inter font family          shared\src\commonMain\composeResources\font\
+
+ NOTE: the app is now Compose Multiplatform. Almost all code lives in :shared and is
+ compiled for both Android and iOS. The :app module is only the Android host.
+ iOS cannot be built on this Windows PC - see iosApp\README.md.
+
+ NOTE: Android Studio ships its own Java (JBR 25). Always build with the JDK 17
+ above - see section 3.1.
+
+-------------------------------------------------------------------------------
+ SECTION 2 - FIREBASE CONSOLE SETUP  ** DO THIS FIRST **
+-------------------------------------------------------------------------------
+
+ Nothing works without this - no sign-in, no alerts, no dashboard.
+ Go to https://console.firebase.google.com and open project "quicktrip-fe547".
+
+ --- 2.1  Enable Email/Password sign-in ------------------------------------
+
+   1. Left menu -> Build -> Authentication
+   2. Click "Get started" if you see it
+   3. Open the "Sign-in method" tab
+   4. Click "Email/Password" -> toggle the first ENABLE on -> Save
+      (Leave "Email link / passwordless" OFF.)
+
+   If you skip this, sign-up fails with:
+     "This operation is not allowed."
+
+   You can DISABLE Anonymous if it is still on - the app no longer uses it.
+
+ --- 2.2  Create the Firestore database ------------------------------------
+
+   1. Left menu -> Firestore
+   2. If it says "Create database":
+        - Location: asia-southeast1  (closest to the Philippines)
+        - Start in PRODUCTION mode
+        - Create
+   3. If it already says the database is ready, skip.
+
+ --- 2.3  Set the security rules -------------------------------------------
+
+   Firestore -> "Rules" tab -> replace everything with exactly this -> PUBLISH:
+
+      rules_version = '2';
+      service cloud.firestore {
+        match /databases/{database}/documents {
+          match /{document=**} {
+            allow read, write: if request.auth != null;
+          }
+        }
+      }
+
+   If you skip this you get "permission denied" and blank screens.
+
+ --- 2.4  Cloud Messaging --------------------------------------------------
+
+   Nothing to enable. The app subscribes to the "alerts" topic on startup.
+   Test push: Build -> Messaging -> Create campaign -> Firebase Notification
+   message -> target Topic = alerts
+
+ --- 2.5  Create the ESP32's own account -----------------------------------
+
+   The hardware writes alerts as a normal signed-in user, not anonymously.
+
+   1. Authentication -> Users -> Add user
+   2. Email:    esp32@siren.local        (any address works, it is never mailed)
+   3. Password: pick one and put it in the firmware
+   4. Copy that email + password into the ESP32 sketch
+
+-------------------------------------------------------------------------------
+ SECTION 3 - BUILDING THE APK
+-------------------------------------------------------------------------------
+
+ --- 3.1  Set up the environment (paste all 4 lines in every new window) ---
+
+   $env:JAVA_HOME="C:\siren_toolchain\jdk-17.0.20+8"
+   $env:ANDROID_HOME="C:\Users\Administrator\AppData\Local\Android\Sdk"
+   $env:Path="$env:JAVA_HOME\bin;$env:Path"
+   cd C:\Users\Administrator\Desktop\Project
+
+ --- 3.2  Build ------------------------------------------------------------
+
+   Debug build (for testing):
+     .\gradlew.bat :app:assembleDebug
+
+   Release build (signed, what you install and hand out):
+     .\gradlew.bat :app:assembleRelease
+
+   Both at once, from clean:
+     .\gradlew.bat clean :app:assembleDebug :app:assembleRelease
+
+   Wait for "BUILD SUCCESSFUL". The first build needs an internet connection.
+
+ --- 3.3  Where the APKs land ----------------------------------------------
+
+   app\build\outputs\apk\release\app-release.apk   <- install this one
+   app\build\outputs\apk\debug\app-debug.apk
+
+ --- 3.4  Installing -------------------------------------------------------
+
+   IMPORTANT: uninstall any older SIREN build from the phone first
+   (Settings -> Apps -> SIREN -> Uninstall). The signing key changed, so
+   installing over the old build fails with "App not installed".
+
+   Then copy the APK to the phone and open it, or:
+     adb install -r app\build\outputs\apk\release\app-release.apk
+
+-------------------------------------------------------------------------------
+ SECTION 4 - USING THE APP
+-------------------------------------------------------------------------------
+
+ First run:
+   1. Tap "Create an account"
+   2. Choose a role - Student, Teacher/School Admin, or Parent/Guardian
+   3. Enter name, email, password (6+ characters)
+
+ Students get a 6-character LINKING CODE, shown in Settings. A parent enters
+ that code under Home -> Link to follow that student's safety status.
+
+ Teachers see the roster for their class. The roster is driven by the classId
+ field on each student's user document - set it in the Firestore console
+ (users -> pick a student -> add field classId, e.g. "Grade 10 - Rizal") and set
+ the same classId on the teacher's own document.
+
+ Demo Mode (Student home -> Demo Mode) fires a simulated Green / Yellow / Red
+ alert without the hardware. Simulated events are tagged DEMO everywhere they
+ appear and are never sent to guardians by SMS.
+
+ --- THE ALARM ------------------------------------------------------------
+
+ A RED alert (>= 0.61 g) sounds an alarm that KEEPS GOING until someone taps.
+ It survives the screen locking, the app being closed, the notification being
+ swiped away, and the phone being on silent.
+
+ It stops ONLY by tapping one of:
+   * I'm Safe
+   * I Need Help
+   * Stop alarm   (silences the sound but you still owe a safety response)
+
+ Green is a single chime. Yellow repeats then stops after 30 seconds.
+
+ The tone is our own, NOT the official NDRRMC alert tone. That is deliberate:
+ this app is a supplementary school tool and must never be mistaken for an
+ official government warning during a real earthquake.
+
+ ON ANDROID 14 AND NEWER: if the phone denies the "full screen intent"
+ permission, the full-screen alert will not appear. The alarm still sounds and
+ the notification still carries the I'm Safe / I Need Help / Stop alarm
+ buttons. Test this before the defence.
+
+-------------------------------------------------------------------------------
+ SECTION 5 - SIGNING KEY
+-------------------------------------------------------------------------------
+
+ siren-release.jks    the key (KEEP IT - back it up)
+ keystore.properties  the passwords Gradle reads
+
+ Both live in the project root. If you lose either one you cannot ship an update
+ to an already-installed app; you would have to generate a new key and make
+ everyone uninstall and reinstall again.
+
+ To generate a replacement (only if lost):
+
+   & "C:\siren_toolchain\jdk-17.0.20+8\bin\keytool.exe" -genkeypair -v `
+     -keystore siren-release.jks -alias siren -keyalg RSA -keysize 2048 `
+     -validity 10000
+
+-------------------------------------------------------------------------------
+ SECTION 6 - FIRESTORE DATA SHAPE
+-------------------------------------------------------------------------------
+
+ users/{userId}
+   name                string
+   email               string
+   role                "student" | "teacher" | "parent"
+   classId             string    (teacher roster + student membership)
+   schoolId            string
+   shortCode           string    (students only - the parent linking code)
+   linkedStudentIds    array     (parents only)
+
+ users/{userId}/responses/{alertId}
+   alertId, status, respondedAt      (mirror, so History works offline)
+
+ alerts/{alertId}
+   intensity           "green" | "yellow" | "red"
+   magnitudeG          number
+   detectedAt          timestamp
+   source              "esp32" | "simulated"
+   nodeId              string
+   closed              boolean
+
+ alerts/{alertId}/responses/{userId}
+   userId, name
+   status              "safe" | "needs_help" | "no_response"
+   respondedAt         timestamp
+
+ Intensity thresholds (must match the firmware):
+   green  <= 0.30 g
+   yellow    0.31 - 0.60 g
+   red    >= 0.61 g
+
+-------------------------------------------------------------------------------
+ SECTION 7 - TESTING CHECKLIST
+-------------------------------------------------------------------------------
+
+ 1. Demo Mode: fire all three levels, confirm colour, vibration and the
+    full-screen alert behave differently at each level.
+ 2. Full loop: tap I'm Safe on one phone, confirm it appears on a teacher or
+    parent account on a second phone/account.
+ 3. Offline: turn on airplane mode, tap I'm Safe, turn data back on, confirm
+    the response syncs (Firestore queues it on device automatically).
+ 4. Push: send a test message to topic "alerts" from the Firebase console.
