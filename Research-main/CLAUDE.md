@@ -1,13 +1,34 @@
-# CLAUDE.md — SIREN Mobile
+# CLAUDE.md — SIREN
 
-Mobile companion app for **SIREN (Seismic Integrated Response and Emergency
-Notification)** — an IoT earthquake detection system built around an ESP32 +
-ADXL335 accelerometer (Practical Research 2, City of Bogo Senior High School).
+**SIREN (Seismic Integrated Response and Emergency Notification)** is an IoT
+earthquake detection system built around an ESP32 and an **MPU6050** accelerometer,
+with a Kotlin Multiplatform companion app (Practical Research 2, City of Bogo Senior
+High School). The device detects local shaking, raises an on-site alarm, and writes
+an alert to Firestore that the app turns into a full-screen warning. Students confirm
+"I'm Safe" or "I Need Help"; teachers and guardians watch a live roll call.
 
-This repo is the **app**, not the firmware. It receives alerts when the hardware
-detects a seismic event, lets users confirm "I'm Safe" / "I Need Help", shows a live
-safety dashboard for teachers and parents, and keeps a history log for the paper's
-evaluation phase.
+The project **won its competition**, and the work now underway is a second phase of
+features on top of a system that already works end to end. See **Next phase** below
+before starting anything new.
+
+This repo holds **both** halves: the app (`shared/`, `app/`, `iosApp/`) and the
+firmware (`firmware/siren_esp32/`).
+
+### Read this before running anything
+
+Everything is nested one level deep, under **`Research-main/`**, because the repo was
+seeded from a zip export rather than a clone. `gradlew` and the module roots live
+there, not at the repo root. Either `cd Research-main` first, or flatten it once and
+never think about it again:
+
+```bash
+git mv Research-main/* Research-main/.gitignore .
+rmdir Research-main
+git commit -m "Flatten the repo: move everything out of Research-main/"
+```
+
+Flattening is the better fix. Paths in this file are written relative to the project
+root, which is `Research-main/` until that is done.
 
 ---
 
@@ -18,6 +39,8 @@ evaluation phase.
 | `:shared` | ✅ Compose Multiplatform library. All UI, models and the data layer. `compileCommonMainKotlinMetadata` and `compileAndroidMain` both pass. |
 | `:app` | ⚠️ Thin Android host (3 files). Builds only where `app/google-services.json` has been restored — see **Secrets**. |
 | `iosApp/` | ⚠️ Swift sources + Podfile written, **never compiled**. Needs a Mac — see below. |
+| `firmware/` | ⚠️ The committed sketch is still **v2.0, ADXL335**. The board now runs **v3.0-mpu6050**, which has not been committed yet. See **Firmware**. |
+| Shipped APK | `dist/` holds **v2.9.2** debug and release. The next build is **v3.0.0** — see **Shipping an APK**. |
 
 ```powershell
 $env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot"
@@ -182,6 +205,106 @@ Each of these cost a debugging cycle:
 
 ---
 
+## Firmware — `firmware/siren_esp32/`
+
+An Arduino sketch, not a Gradle module. Open the folder in Arduino IDE (the folder
+name and the `.ino` name must match, or the IDE refuses to open it), board **ESP32
+Dev Module**, and copy `secrets.h.example` to `secrets.h` first.
+
+Libraries: **ArduinoJson 7.x** (by Benoît Blanchon) and **LiquidCrystal I2C** (by
+Frank de Brabander). Everything else ships with the ESP32 board package. The MPU6050
+is driven with plain `Wire`, so it needs no library at all.
+
+### Wiring
+
+| Part | ESP32 |
+|---|---|
+| MPU6050 VCC / GND / SDA / SCL | 3V3 / GND / GPIO21 / GPIO22 |
+| LCD 16x2 I2C SDA / SCL / VCC / GND | GPIO21 / GPIO22 / 5V / GND |
+| Green / Yellow / Red LED anode | GPIO25 / 26 / 27, each through 220 Ω |
+| All LED cathodes | GND rail |
+| Buzzer 1 signal / Buzzer 2 signal | GPIO14 / GPIO13 |
+
+The MPU6050 and the LCD share one I2C bus and do not clash: the LCD answers on 0x27,
+the MPU on 0x68 (0x69 if AD0 is pulled high). GPIO 34, 35 and 32 are now free, and
+**GPIO12 must stay unconnected** because it is a strapping pin that picks the flash
+voltage at boot.
+
+Each LED needs its **own** breadboard rows. Commoning the three anodes lights all
+three at once, which reads as a hardware fault in the firmware and is not one.
+
+### How detection works
+
+1. **Calibrate** (10 s, 1000 samples). Records the per-axis bias, which includes
+   gravity, and the noise floor `sigma_g`.
+2. **Trigger** = `3 × sigma_g`, clamped to `[MIN_TRIGGER_G, MAX_TRIGGER_G]` =
+   `[0.030, 0.090]`. The clamp exists in both directions: the floor keeps noise from
+   triggering, the cap keeps a noisy calibration from pushing the trigger past the
+   Red boundary and silently making Yellow impossible.
+3. **Confirm**: motion must stay above the trigger for `MIN_SAMPLES_ABOVE` = 8
+   samples inside a 300 ms window, otherwise it is logged as `REJECT` and ignored.
+4. **Classify on the mean over the confirmation window, not the peak.** A knock or a
+   dropped object is one enormous spike and nothing after it; an earthquake shakes
+   continuously. The mean separates them. Peak classification sent every desk tap
+   straight to Red.
+5. **Alert**: LEDs, both buzzers (Yellow and Red only), LCD, then a Firestore write.
+6. **Hold 3 s, cooldown 0 s**, then straight back to monitoring. These were 15 s and
+   30 s. Anything longer is a 45-second blind window in which the system looks broken
+   because it ignores every shake.
+
+### Serial console (115200 baud)
+
+| Key | Does |
+|---|---|
+| `I` | Scan the I2C bus. Expect `0x27 LCD` and `0x68 MPU6050`. |
+| `L` | Live per-axis reading in g. At rest one axis reads about ±1.000, the others about 0.000, total about 1.000. |
+| `C` | Recalibrate. Board must be flat and untouched. |
+| `Z` | Reprint the last calibration. |
+| `W` | WiFi, IP, auth and clock status. |
+| `G` / `Y` / `R` | Fire a fake Green / Yellow / Red alert. |
+| `S` | Stop the current alert. |
+
+### Firmware constraints — do not rediscover these
+
+- **A sensor that reads nothing looks exactly like a violent earthquake.** The dead
+  ADXL335 produced a steady 12 g and a false alert every few seconds. Calibration now
+  checks that the sensor feels about 1.000 g of gravity at rest, which catches a bad
+  connection immediately, and a failed I2C read returns "no motion" instead of a
+  garbage spike. Keep both.
+- **The board must not be tilted after calibration.** The bias includes gravity, so a
+  few degrees of tilt reads as permanent shaking. Mount the MPU firmly and press `C`
+  if it ever moves.
+- **`G` / `Y` / `R` must fire magnitudes inside their own bands** (0.005 / 0.050 /
+  0.300). They were 0.22 / 0.48 / 0.85, all above the Red boundary, so all three fired
+  Red for months. The app's `simulateAlert` has the correct values; keep the two in
+  step.
+- **`ADC_ATTEN_DB_12` is an ESP-IDF name and does not compile under Arduino**, which
+  exports `ADC_0db, ADC_2_5db, ADC_6db, ADC_11db`. Accepting the compiler's suggestion
+  of `ADC_ATTENDB_MAX` compiles and then floods the log with `invalid ADC attenuation`
+  while every analog read returns garbage. Moot now that the sensor is digital, but
+  that is what a wall of `adc_cali` errors means.
+- **The Firestore write blocks for 2 to 3 seconds** because `postJson` opens a fresh
+  TLS connection per call. The local alarm fires in about 350 ms, well before it. If
+  the phone alert needs to be faster, reuse the `WiFiClientSecure` and call
+  `setReuse(true)` rather than touching detection.
+- **Upload problems are almost never the sketch.** A `Write timeout` with COM3 to
+  COM10 listed means those are Bluetooth virtual ports and the real board is missing
+  its **CP210x driver** — the device sits under "Other devices" in Device Manager with
+  a yellow triangle until the Silicon Labs VCP driver is installed. A corrupted build
+  cache (`file format not recognized` on a `.o`) is fixed by deleting
+  `%LOCALAPPDATA%\arduino\sketches`.
+- **WiFi must be 2.4 GHz.** An iPhone hotspot needs "Maximize Compatibility" on.
+
+### Firmware state
+
+`firmware/siren_esp32/siren_esp32.ino` in the repo is **v2.0 and reads the ADXL335 on
+GPIO 34/35/32**. The board runs **v3.0-mpu6050**, which is not committed. Commit the
+running sketch before changing anything else, so the repo stops disagreeing with the
+hardware. It compiles clean for `esp32:esp32:esp32`: about 82% of program storage and
+15% of dynamic memory.
+
+---
+
 ## REMAINING WORK
 
 ### 1. Build and test on iOS ❌
@@ -227,6 +350,105 @@ specific, actionable error and nothing more. See **Authentication → Phone sign
 - `Yellow` still steps down after 30 s by design, while Red loops until dismissed. If
   the intent is for *every* level to ring until acknowledged, that is a one-line change
   in `AndroidPlatformServices.startAlarm` (`EXTRA_TIMEOUT_MS`)
+
+---
+
+## Next phase (post-competition)
+
+Five features, in the order that makes sense to build them. Nothing here is started.
+
+**Before adding any field to an `alerts` document**, read the warning at the end of
+**Data model** — a field the app cannot decode silently removes the alert from the
+list, which looks exactly like the hardware failing.
+
+### 0. Background push is still missing (do this first)
+
+Nothing publishes to the FCM `alerts` topic when a document is created. The app only
+sees an alert through its Firestore listener, which needs the app to be running. **On
+a phone where the app has been swiped away, no alert arrives at all**, and that is by
+far the biggest hole in the system.
+
+The fix is a ~30-line Cloud Function on `onDocumentCreated("alerts/{alertId}")` that
+sends a data-only, high-priority message to the topic with `alertId`, `intensity`,
+`magnitudeG` and `nodeId` — the exact keys `SirenMessagingService` already reads, so
+no app change is needed. It requires the **Blaze plan**, which needs a billing card
+even though this usage stays inside the free tier. If billing is impossible, say so in
+the paper as a limitation rather than pretending the app alerts when closed.
+
+### 1. GPS location tracking
+
+Where a student is during an earthquake, on a map, for their linked guardians and
+teachers.
+
+- Use the **phone's** GPS. No hardware change.
+- This tracks minors, so design the limits in from the start: explicit opt-in,
+  location shared **only while an alert is active**, visible only to already-linked
+  guardians and the student's own adviser, and a visible indicator while sharing.
+  Continuous background tracking is out of scope and should stay out.
+- Google Maps needs an API key with billing attached. **OpenStreetMap via a tile
+  library avoids that** and is the better default for a school project.
+- Goes through `PlatformServices` like every other platform capability, not
+  expect/actual.
+- Firestore: add to the response document rather than the alert, e.g.
+  `alerts/{alertId}/responses/{userId}` gaining `lat`, `lng`, `accuracyM`,
+  `locatedAt`. That keeps it scoped to one event and expires naturally.
+
+### 2. Official earthquake data in the app
+
+**PHIVOLCS has no public API.** Their bulletin page can be scraped, but it breaks
+easily and has had certificate problems, and scraping needs a server. Use the standard
+seismological feeds instead:
+
+- **EMSC** primary: `https://www.seismicportal.eu/fdsnws/event/1/query` (FDSN, JSON,
+  no key). Better regional pickup.
+- **USGS** fallback: `https://earthquake.usgs.gov/fdsnws/event/1/query` and the
+  GeoJSON summary feeds. No key, CDN-cached, updated about every minute.
+- Filter to the Philippines with a bounding box, roughly lat 4 to 21, lon 116 to 127.
+
+Honest limits to carry into the UI and the paper: these are global networks, so small
+local events PHIVOLCS reports may be missing; magnitudes can differ from PHIVOLCS by a
+tenth or two because different agencies use different stations and scales; values are
+revised after first publication; and the feed is minutes behind, so it is a
+**confirmation** source, not the warning. **Label the source in the UI.** Do not call
+it PHIVOLCS data.
+
+The strong research angle here is cross-referencing: when the node fires, query the
+feed for a nearby event in the same window and mark the alert confirmed or
+unconfirmed. That gives the evaluation an independent ground truth, which is the first
+thing a panel asks about.
+
+### 3. Magnitude and intensity together
+
+Display "Magnitude 4.4 | Intensity III".
+
+**The device cannot measure magnitude.** Magnitude is energy at the source and takes
+several stations to compute. The node measures shaking where it sits, which is
+intensity. So: **magnitude from the feed, intensity from the device**, each labelled
+with where it came from. Anything else is a claim the hardware cannot support, and it
+is the easiest thing for a panel to pull apart.
+
+Mapping PGA to a PEIS roman numeral belongs in `Intensity` in `Models.kt` so the app
+and the firmware keep one source of truth. Note that USGS's `mmi` field is Modified
+Mercalli, not PEIS, and is often empty for smaller events.
+
+### 4. In-app voice alert
+
+The app speaks the alert aloud, for example "Intensity seven. Take cover."
+
+- Android `TextToSpeech`, iOS `AVSpeechSynthesizer`, both behind `PlatformServices`.
+- Filipino voices exist on most Android phones. **Cebuano generally does not**, so if
+  the alert should be in Bisaya, use short pre-recorded clips instead of TTS.
+- The alarm already owns audio. `SirenAlarmService` holds a `MediaPlayer` with
+  `USAGE_ALARM` and an exclusive audio-focus request, so speech has to be sequenced
+  against it or it will either be inaudible or steal focus from the siren. Speak once
+  after the first alarm loop rather than over it.
+
+### 5. Web version (future)
+
+For iOS and desktop users, on the same Firestore backend. Compose Multiplatform has a
+`wasmJs` target, so some of `shared/` may carry over, but GitLive's Firebase bindings
+and every `PlatformServices` implementation would need a web actual. Treat it as a
+separate front end against the same data, not a fourth target of this build.
 
 ---
 
@@ -649,10 +871,16 @@ them in both the methodology and the Definition of Terms. The firmware shipped w
 `0.31` / `0.61` — off by 5–30× — and was corrected to match; check the paper before
 assuming code is right.
 
-Still open: `MIN_TRIGGER_G = 0.08f` gates all detection and sits above the whole Green
-band and most of Yellow, so Green cannot currently fire from the sensor. Setting it
-properly needs real ADXL335 calibration data — run `calibrate()` and read the `triggerG`
-it prints.
+Settled since: `MIN_TRIGGER_G` was `0.08f`, which sat above the whole Green band and
+most of Yellow, so nearly every real shake landed in Red. With the MPU6050 the trigger
+is `0.030` with a cap at `0.090`, which leaves Yellow a real window. Green cannot fire
+from the sensor by design: 0.010 g is below the noise floor of any hobby accelerometer,
+so Green only ever arrives from Demo Mode or the `G` console command.
+
+Worth knowing for the paper: **hand-shaking the board exceeds 0.120 g easily**, so
+manual tests nearly always read Red. That is correct behaviour, not a bug. Human motion
+is stronger than typical seismic ground acceleration. Verify Yellow and Green through
+the serial commands and Demo Mode, and say so in the methodology.
 
 | Band | Shown to users | g range | Level | Behaviour |
 |---|---|---|---|---|
@@ -733,11 +961,62 @@ Enums serialise lower-case via their `wire` property. Always read through
 Parents watch children with one document flow each, `combine`d — deliberately avoiding
 a `whereIn` on document ids and the index that implies.
 
+**Adding a field to an alert is an app change first.** The listener maps each snapshot
+inside `runCatching { }`, so a document the DTO cannot decode is dropped from the list
+with no error, no row and no alert on the phone. That failure looks exactly like the
+hardware not writing. The order is: add the field to `AlertDoc` and `AlertRecord`
+**with a default**, ship that build to every phone, and only then start writing the
+field from the firmware or a Cloud Function. Defaults are what keep the hundreds of
+existing documents decoding.
+
+The `alerts` collection also carries a lot of old `SIMULATOR` test documents. Clearing
+them before a demo makes real behaviour much easier to see.
+
 ## Conventions
 
 - Colours and spacing live in `ui/theme`; never hard-code hex values in screens
 - Inter is the only font family
 - Simulated events are always tagged so they stay separable from real sensor readings
+
+## Shipping an APK
+
+`dist/` currently holds **v2.9.2**. The next build carrying the second-phase work is
+**v3.0.0**, and the version bump is part of the change, not an afterthought: Android
+refuses to install an APK whose `versionCode` is not higher than the installed one,
+and it says only "App not installed".
+
+1. Bump both fields in `app/build.gradle.kts`. They move together:
+   ```kotlin
+   versionCode = 10        // was 9
+   versionName = "3.0.0"   // was "2.9.2"
+   ```
+2. Build from the project root, with JDK 17:
+   ```powershell
+   .\gradlew.bat :app:assembleDebug
+   .\gradlew.bat :app:assembleRelease
+   ```
+3. Copy the artifacts in under the existing naming convention and delete the previous
+   pair, so `dist/` never holds two versions of the same variant:
+   ```
+   app/build/outputs/apk/debug/app-debug.apk      -> dist/debug/SIREN-v3.0.0-debug.apk
+   app/build/outputs/apk/release/app-release.apk  -> dist/release/SIREN-v3.0.0-release.apk
+   ```
+4. Update `dist/debug/README.md` and `dist/release/README.md`: version, date, size,
+   and what changed. Those files are the record of what a given APK actually contains.
+5. Verify the release APK before trusting it. A passing build proves nothing about the
+   two things that have silently broken before:
+   ```powershell
+   apksigner verify --print-certs dist\release\SIREN-v3.0.0-release.apk
+   aapt2 dump resources dist\release\SIREN-v3.0.0-release.apk | Select-String "raw/siren_alarm"
+   ```
+   The fingerprint must match the key recorded below, and the alarm audio must resolve
+   through the resource table. Do not look for `res/raw/siren_alarm.mp3` by path — see
+   the constraint about path shortening.
+6. Install it on a real phone and walk Demo Mode through all three tiers. Nothing in
+   `dist/README.md` has ever been run; it only records that the code compiled.
+
+A release build needs `keystore.properties` and `siren-release.jks` restored first, or
+it comes out unsigned without complaining.
 
 ## The release signing key — do not generate another one
 
@@ -782,6 +1061,21 @@ referenced in `dist/README.md`, **does not exist** — use `keytool` directly.
 `.gitignore` excludes `keystore.properties` and `*.jks`. A fresh clone needs both
 restored before it can build a release.
 
+The firmware has its own `firmware/siren_esp32/secrets.h`, also gitignored, holding
+the WiFi credentials, the Firebase project id and web API key, and the ESP32's own
+Firebase account. Copy `secrets.h.example` and fill it in. Every value stays inside
+double quotes; removing them produces a misleading "was not declared in this scope".
+
+**The Firebase project is called "Research" but its project id is
+`quicktrip-fe547`**, left over from how it was created. That is correct and not a
+mistake — `FIREBASE_PROJECT_ID` in `secrets.h` and `project_id` in
+`app/google-services.json` must both read `quicktrip-fe547`. A mismatch here means the
+device writes somewhere the app never looks, and both sides appear to be working.
+
+The device signs in as its own Firebase user, `esp32@siren.local`, which must exist
+under Authentication → Users. `INVALID_LOGIN_CREDENTIALS` on the serial log means it
+does not; `API_KEY_INVALID` means the web API key is wrong.
+
 `app/google-services.json` **is now committed**, deliberately, at the project
 owner's direction — `:app` cannot build a single task without it, the repo is
 private, and the file ships inside every APK anyway. The `.gitignore` entry for it
@@ -790,9 +1084,12 @@ matter and stays out.
 
 ## Out of scope
 
-- ESP32 hardware design and wiring (the sketch itself now lives in `firmware/siren_esp32/`)
+- Enclosure design, PCB layout, mains wiring
 - QR-code scanning for parent linking (needs a camera dependency; code entry only)
 - Structural damage assessment, evacuation routing, search-and-rescue
+- Scraping PHIVOLCS directly — see **Next phase → 2**
+- Earthquake prediction. The system detects shaking that has already reached the
+  sensor; it gives no warning before ground motion arrives
 - Replacing official PHIVOLCS warnings — supplementary local tool only
 
 ## Testing priorities
@@ -803,3 +1100,8 @@ matter and stays out.
 4. Push to topic `alerts` from the Firebase console
 5. **Safety Guide icons and Inter fonts actually render** — the canary for the
    Compose-resources packaging workaround above
+6. **End to end from the hardware**: `I` and `L` on the serial console to prove the
+   sensor reads, `C` for a clean `health,ok`, then shake the board and confirm
+   `TRIAL` and `CLOUD,OK` on serial, a document in the `alerts` collection, and the
+   alert on a phone. Test it once with the app open and once with it swiped away —
+   the second case does not work yet, and that is the point of **Next phase → 0**.

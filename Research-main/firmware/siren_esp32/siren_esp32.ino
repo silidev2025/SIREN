@@ -8,58 +8,48 @@
 
 #include "secrets.h"
 
-// ---------------------------------------------------------------------------
-// SIM800L — optional GSM fallback for when WiFi is down.
-//
-// These defaults keep the modem OFF, so a secrets.h written before the modem
-// existed still compiles and behaves exactly as it did. Switch it on by adding
-// SIM800L_ENABLED 1 and SIM_RECIPIENTS to secrets.h — see secrets.h.example.
-//
-// The modem sends SMS only. It deliberately does NOT carry the Firestore write:
-// SIM800L is 2G with an onboard TLS stack that tops out around TLS 1.0, and
-// Google's REST endpoints require TLS 1.2+, so the handshake fails before any
-// request is made. SMS is the path that actually survives a WiFi outage.
-// ---------------------------------------------------------------------------
-#ifndef SIM800L_ENABLED
-  #define SIM800L_ENABLED 0
-#endif
-#ifndef SIM_RECIPIENTS
-  #define SIM_RECIPIENTS ""
-#endif
-#ifndef SIM_MIN_BAND
-  #define SIM_MIN_BAND "yellow"
-#endif
-#ifndef SIM_SMS_COOLDOWN_MS
-  #define SIM_SMS_COOLDOWN_MS 120000UL
-#endif
-
-const int PIN_X = 34;
-const int PIN_Y = 35;
-const int PIN_Z = 32;
-
 const int PIN_LED_GREEN  = 25;
 const int PIN_LED_YELLOW = 26;
 const int PIN_LED_RED    = 27;
 const int PIN_BUZZER     = 14;
+const int PIN_BUZZER2    = 13;
 
+// The MPU6050 and the LCD share one I2C bus. They do not clash because each
+// answers on its own address: LCD 0x27, MPU6050 0x68 (0x69 if AD0 is high).
 const int PIN_SDA = 21;
 const int PIN_SCL = 22;
 
-// UART2. Wire ESP32 RX to the modem's TXD and ESP32 TX to the modem's RXD —
-// crossed, not straight through. The ESP32 TX line needs a divider down to
-// ~2.8 V; the modem's 3.3 V-tolerant input is the one thing here that is not.
-const int PIN_SIM_RX = 16;   // ESP32 RX2  <-- SIM800L TXD
-const int PIN_SIM_TX = 17;   // ESP32 TX2  --> SIM800L RXD (through divider)
-
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-
-#if SIM800L_ENABLED
-HardwareSerial simSerial(2);
-#endif
 
 #define BUZZER_IS_ACTIVE 1
 
-const float MV_PER_G = 330.0f;
+// ---------------------------------------------------------------------------
+// MPU6050
+// ---------------------------------------------------------------------------
+const uint8_t MPU_REG_SMPLRT_DIV   = 0x19;
+const uint8_t MPU_REG_CONFIG       = 0x1A;
+const uint8_t MPU_REG_ACCEL_CONFIG = 0x1C;
+const uint8_t MPU_REG_ACCEL_XOUT_H = 0x3B;
+const uint8_t MPU_REG_PWR_MGMT_1   = 0x6B;
+const uint8_t MPU_REG_WHO_AM_I     = 0x75;
+
+// +/-2 g full scale. Earthquake shaking that matters here is well under 1 g,
+// and the smallest range gives the finest resolution: 16384 counts per g.
+const float LSB_PER_G = 16384.0f;
+
+uint8_t  mpuAddr  = 0;
+bool     mpuReady = false;
+uint32_t sensorErrors = 0;
+
+// A still accelerometer always feels exactly 1 g of gravity, whatever way it
+// is mounted. If calibration measures something far from 1 g, the sensor is
+// not being read correctly and every magnitude after it would be wrong.
+const float GRAVITY_MIN_G = 0.85f;
+const float GRAVITY_MAX_G = 1.15f;
+
+// The MPU6050's digital noise floor is a few thousandths of a g. Anything
+// well above that during calibration means the board was moving or bumped.
+const float SIGMA_WARN_G = 0.020f;
 
 const uint16_t CAL_SAMPLES     = 1000;
 const uint8_t  CAL_INTERVAL_MS = 10;
@@ -67,24 +57,44 @@ const uint8_t  MA_WINDOW       = 8;
 const uint32_t SAMPLE_US       = 5000;
 
 const float    SIGMA_MULTIPLIER  = 3.0f;
-const float    MIN_TRIGGER_G     = 0.08f;
+
+// The MPU6050 is far quieter than the ADXL335 read through the ESP32's ADC,
+// so the trigger can sit lower and give the Yellow band real room. If desk
+// bumps or footsteps start setting it off, raise this towards 0.050.
+const float    MIN_TRIGGER_G     = 0.030f;
+
+// Never let a noisy calibration push the trigger past the Red boundary,
+// which would silently make Yellow impossible.
+const float    MAX_TRIGGER_G     = 0.090f;
+
 const float    ONSET_FRACTION    = 0.50f;
 const uint16_t CONFIRM_MS        = 300;
 const uint8_t  MIN_SAMPLES_ABOVE = 8;
-const uint16_t ALERT_HOLD_MS     = 15000;
-const uint16_t COOLDOWN_MS       = 30000;
 
+// Alarm sounds for 3 seconds, then the system goes straight back to
+// monitoring so it can detect again right away.
+const uint16_t ALERT_HOLD_MS     = 3000;
+const uint16_t COOLDOWN_MS       = 0;
+
+// Must stay in lockstep with Intensity.fromMagnitude in the mobile app
+// (shared/src/commonMain/kotlin/com/siren/mobile/model/Models.kt) and with the
+// thresholds published in the research paper:
+//   Green  0.000 - 0.010 g   Intensity I-IV    light shaking
+//   Yellow 0.010 - 0.120 g   Intensity V-VI    moderate shaking
+//   Red    0.120 g and above Intensity VII+    destructive shaking
 const float BAND_YELLOW_G = 0.010f;
 const float BAND_RED_G    = 0.120f;
 
-float biasX = 1650, biasY = 1650, biasZ = 1650;
-float sigmaResultantMv = 1.0f;
+float biasX = 0, biasY = 0, biasZ = 1;
+float sigmaResultantG = 0.0f;
+float gravityG = 1.0f;
 float triggerG = MIN_TRIGGER_G;
 float onsetG   = MIN_TRIGGER_G * ONSET_FRACTION;
+bool  calibrationSuspect = false;
 
-uint16_t bufX[MA_WINDOW], bufY[MA_WINDOW], bufZ[MA_WINDOW];
+int16_t  bufX[MA_WINDOW], bufY[MA_WINDOW], bufZ[MA_WINDOW];
 uint8_t  bufIdx = 0;
-uint32_t sumX = 0, sumY = 0, sumZ = 0;
+int32_t  sumX = 0, sumY = 0, sumZ = 0;
 bool     bufPrimed = false;
 
 enum State { IDLE, CONFIRMING, ALERTING, COOLDOWN };
@@ -95,6 +105,13 @@ float    peakG = 0;
 uint8_t  samplesAbove = 0;
 uint16_t seq = 0;
 char     lastType[10] = "shake";
+
+// A knock or a dropped object produces one enormous spike and nothing after
+// it, while an earthquake shakes continuously. Classifying on the mean over
+// the confirmation window instead of the single highest sample separates the
+// two: an impulse averages down, sustained motion does not.
+float    sumG = 0;
+uint16_t countG = 0;
 
 uint32_t nextSampleUs = 0;
 
@@ -111,53 +128,36 @@ const char* bandName(float g) {
 
 void buzzerOn() {
 #if BUZZER_IS_ACTIVE
-  digitalWrite(PIN_BUZZER, HIGH);
+  digitalWrite(PIN_BUZZER,  HIGH);
+  digitalWrite(PIN_BUZZER2, HIGH);
 #else
   #if ESP_ARDUINO_VERSION_MAJOR >= 3
-    tone(PIN_BUZZER, 2500);
+    tone(PIN_BUZZER,  2500);
+    tone(PIN_BUZZER2, 2500);
   #else
     ledcSetup(0, 2500, 8);
     ledcAttachPin(PIN_BUZZER, 0);
     ledcWrite(0, 128);
+    ledcSetup(1, 2500, 8);
+    ledcAttachPin(PIN_BUZZER2, 1);
+    ledcWrite(1, 128);
   #endif
 #endif
 }
 
 void buzzerOff() {
 #if BUZZER_IS_ACTIVE
-  digitalWrite(PIN_BUZZER, LOW);
+  digitalWrite(PIN_BUZZER,  LOW);
+  digitalWrite(PIN_BUZZER2, LOW);
 #else
   #if ESP_ARDUINO_VERSION_MAJOR >= 3
     noTone(PIN_BUZZER);
+    noTone(PIN_BUZZER2);
   #else
     ledcWrite(0, 0);
+    ledcWrite(1, 0);
   #endif
 #endif
-}
-
-float readResultantG() {
-  uint16_t rx = analogReadMilliVolts(PIN_X);
-  uint16_t ry = analogReadMilliVolts(PIN_Y);
-  uint16_t rz = analogReadMilliVolts(PIN_Z);
-
-  if (!bufPrimed) {
-    for (uint8_t i = 0; i < MA_WINDOW; i++) { bufX[i] = rx; bufY[i] = ry; bufZ[i] = rz; }
-    sumX = (uint32_t)rx * MA_WINDOW;
-    sumY = (uint32_t)ry * MA_WINDOW;
-    sumZ = (uint32_t)rz * MA_WINDOW;
-    bufPrimed = true;
-  }
-
-  sumX += rx - bufX[bufIdx]; bufX[bufIdx] = rx;
-  sumY += ry - bufY[bufIdx]; bufY[bufIdx] = ry;
-  sumZ += rz - bufZ[bufIdx]; bufZ[bufIdx] = rz;
-  bufIdx = (bufIdx + 1) % MA_WINDOW;
-
-  float dx = (sumX / (float)MA_WINDOW) - biasX;
-  float dy = (sumY / (float)MA_WINDOW) - biasY;
-  float dz = (sumZ / (float)MA_WINDOW) - biasZ;
-
-  return sqrtf(dx * dx + dy * dy + dz * dz) / MV_PER_G;
 }
 
 void setLeds(bool g, bool y, bool r) {
@@ -172,14 +172,160 @@ void lcdTwoLines(const char* a, const char* b) {
   lcd.setCursor(0, 1); lcd.print(b);
 }
 
+// ---------------------------------------------------------------------------
+// MPU6050 low-level access (plain Wire, no extra library needed)
+// ---------------------------------------------------------------------------
+bool i2cPresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+bool mpuWrite(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(mpuAddr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+int mpuReadByte(uint8_t reg) {
+  Wire.beginTransmission(mpuAddr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return -1;
+  if (Wire.requestFrom((uint16_t)mpuAddr, (size_t)1, true) != 1) return -1;
+  return Wire.read();
+}
+
+bool mpuInit() {
+  mpuReady = false;
+
+  if      (i2cPresent(0x68)) mpuAddr = 0x68;
+  else if (i2cPresent(0x69)) mpuAddr = 0x69;
+  else {
+    Serial.println("SENSOR,ERR,MPU6050 not found on I2C (tried 0x68 and 0x69)");
+    Serial.println("SENSOR,HINT,check VCC=3V3, GND, SDA=GPIO21, SCL=GPIO22; type I to scan the bus");
+    return false;
+  }
+
+  mpuWrite(MPU_REG_PWR_MGMT_1, 0x80);   // reset
+  delay(100);
+  mpuWrite(MPU_REG_PWR_MGMT_1, 0x01);   // wake up, gyro PLL clock (more stable)
+  delay(50);
+  mpuWrite(MPU_REG_SMPLRT_DIV, 0x04);   // 1 kHz / (1 + 4) = 200 Hz, matches SAMPLE_US
+  mpuWrite(MPU_REG_CONFIG, 0x03);       // digital low-pass ~44 Hz, cuts high-frequency noise
+  bool ok = mpuWrite(MPU_REG_ACCEL_CONFIG, 0x00);   // +/-2 g
+
+  int who = mpuReadByte(MPU_REG_WHO_AM_I);
+
+  // Genuine MPU6050 answers 0x68. Many GY-521 boards carry a clone (0x70,
+  // 0x72, 0x98...) with the same accelerometer registers, so only warn.
+  Serial.printf("SENSOR,ok,addr=0x%02X,whoami=0x%02X%s\n",
+                mpuAddr, who < 0 ? 0 : who,
+                (who == 0x68) ? "" : ",clone-or-variant (should still work)");
+
+  mpuReady = ok && who >= 0;
+  if (!mpuReady) Serial.println("SENSOR,ERR,MPU6050 answered but would not configure");
+  return mpuReady;
+}
+
+bool readAccelRaw(int16_t& ax, int16_t& ay, int16_t& az) {
+  if (!mpuReady) return false;
+
+  Wire.beginTransmission(mpuAddr);
+  Wire.write(MPU_REG_ACCEL_XOUT_H);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((uint16_t)mpuAddr, (size_t)6, true) != 6) return false;
+
+  // Read into separate bytes first: in "(read() << 8) | read()" C++ does not
+  // guarantee which read() runs first, which can silently swap the bytes.
+  uint8_t xh = Wire.read(), xl = Wire.read();
+  uint8_t yh = Wire.read(), yl = Wire.read();
+  uint8_t zh = Wire.read(), zl = Wire.read();
+  ax = (int16_t)((xh << 8) | xl);
+  ay = (int16_t)((yh << 8) | yl);
+  az = (int16_t)((zh << 8) | zl);
+  return true;
+}
+
+void noteSensorError() {
+  sensorErrors++;
+  static uint32_t lastPrint = 0;
+  if (millis() - lastPrint > 1000) {
+    lastPrint = millis();
+    Serial.printf("SENSOR,ERR,read failed,total=%lu\n", (unsigned long)sensorErrors);
+  }
+}
+
+float readResultantG() {
+  int16_t rx, ry, rz;
+
+  // A failed read counts as "no motion". Returning garbage here is exactly
+  // what caused false alarms with the old sensor, so never guess.
+  if (!readAccelRaw(rx, ry, rz)) {
+    noteSensorError();
+    return 0.0f;
+  }
+
+  if (!bufPrimed) {
+    for (uint8_t i = 0; i < MA_WINDOW; i++) { bufX[i] = rx; bufY[i] = ry; bufZ[i] = rz; }
+    sumX = (int32_t)rx * MA_WINDOW;
+    sumY = (int32_t)ry * MA_WINDOW;
+    sumZ = (int32_t)rz * MA_WINDOW;
+    bufPrimed = true;
+  }
+
+  sumX += rx - bufX[bufIdx]; bufX[bufIdx] = rx;
+  sumY += ry - bufY[bufIdx]; bufY[bufIdx] = ry;
+  sumZ += rz - bufZ[bufIdx]; bufZ[bufIdx] = rz;
+  bufIdx = (bufIdx + 1) % MA_WINDOW;
+
+  // Subtracting the calibrated bias removes gravity, leaving only the shaking.
+  float dx = (sumX / (float)MA_WINDOW) / LSB_PER_G - biasX;
+  float dy = (sumY / (float)MA_WINDOW) / LSB_PER_G - biasY;
+  float dz = (sumZ / (float)MA_WINDOW) / LSB_PER_G - biasZ;
+
+  return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+// ---------------------------------------------------------------------------
+// Calibration
+// ---------------------------------------------------------------------------
 void printCalibration() {
   Serial.println("CAL,done");
-  Serial.printf("CAL,bias_mv,%.2f,%.2f,%.2f\n", biasX, biasY, biasZ);
-  Serial.printf("CAL,sigma_mv,%.4f\n", sigmaResultantMv);
-  Serial.printf("CAL,sigma_g,%.5f\n", sigmaResultantMv / MV_PER_G);
+  Serial.printf("CAL,bias_g,%.4f,%.4f,%.4f\n", biasX, biasY, biasZ);
+  Serial.printf("CAL,gravity_g,%.4f\n", gravityG);
+  Serial.printf("CAL,sigma_g,%.5f\n", sigmaResultantG);
   Serial.printf("CAL,trigger_g,%.4f\n", triggerG);
   Serial.printf("CAL,onset_g,%.4f\n", onsetG);
-  Serial.printf("CAL,mv_per_g,%.2f\n", MV_PER_G);
+  Serial.printf("CAL,health,%s\n", calibrationSuspect ? "SUSPECT" : "ok");
+}
+
+void checkCalibrationHealth(uint16_t failedReads) {
+  calibrationSuspect = false;
+
+  if (!mpuReady) {
+    calibrationSuspect = true;
+    Serial.println("CAL,WARN,no MPU6050, detection is off until it is connected (then type C)");
+    return;
+  }
+
+  if (failedReads > 0) {
+    calibrationSuspect = true;
+    Serial.printf("CAL,WARN,%u of %u reads failed, check SDA/SCL wires\n",
+                  failedReads, CAL_SAMPLES);
+  }
+
+  if (gravityG < GRAVITY_MIN_G || gravityG > GRAVITY_MAX_G) {
+    calibrationSuspect = true;
+    Serial.printf("CAL,WARN,sensor feels %.3f g of gravity, expected about 1.000 g\n", gravityG);
+    Serial.println("CAL,WARN,the sensor is not being read correctly; check wiring");
+  }
+
+  if (sigmaResultantG > SIGMA_WARN_G) {
+    calibrationSuspect = true;
+    Serial.printf("CAL,WARN,noise %.4f g is high, expected under %.3f g\n",
+                  sigmaResultantG, SIGMA_WARN_G);
+    Serial.println("CAL,WARN,recalibrate with C while nothing touches the sensor");
+  }
 }
 
 void calibrate() {
@@ -187,53 +333,70 @@ void calibrate() {
   setLeds(false, false, false);
   buzzerOff();
 
+  if (!mpuReady) mpuInit();
+
   lcdTwoLines("Calibrating...", "Keep it still");
   Serial.println("CAL,start,keep the sensor still");
 
-  float refX = analogReadMilliVolts(PIN_X);
-  float refY = analogReadMilliVolts(PIN_Y);
-  float refZ = analogReadMilliVolts(PIN_Z);
-
   double sX = 0, sY = 0, sZ = 0;
   double qX = 0, qY = 0, qZ = 0;
+  uint16_t good = 0, failed = 0;
 
   for (uint16_t i = 0; i < CAL_SAMPLES; i++) {
-    double dx = analogReadMilliVolts(PIN_X) - refX;
-    double dy = analogReadMilliVolts(PIN_Y) - refY;
-    double dz = analogReadMilliVolts(PIN_Z) - refZ;
-    sX += dx; qX += dx * dx;
-    sY += dy; qY += dy * dy;
-    sZ += dz; qZ += dz * dz;
+    int16_t rx, ry, rz;
+    if (readAccelRaw(rx, ry, rz)) {
+      double gx = rx / LSB_PER_G, gy = ry / LSB_PER_G, gz = rz / LSB_PER_G;
+      sX += gx; qX += gx * gx;
+      sY += gy; qY += gy * gy;
+      sZ += gz; qZ += gz * gz;
+      good++;
+    } else {
+      failed++;
+    }
 
     if (i % 100 == 0) { lcd.setCursor(14, 0); lcd.print((int)(i / 100)); }
     delay(CAL_INTERVAL_MS);
   }
 
-  const double n = CAL_SAMPLES;
-  biasX = refX + sX / n;
-  biasY = refY + sY / n;
-  biasZ = refZ + sZ / n;
+  if (good >= 2) {
+    const double n = good;
+    biasX = sX / n;
+    biasY = sY / n;
+    biasZ = sZ / n;
 
-  double varX = (qX - (sX * sX) / n) / (n - 1);
-  double varY = (qY - (sY * sY) / n) / (n - 1);
-  double varZ = (qZ - (sZ * sZ) / n) / (n - 1);
-  if (varX < 0) varX = 0;
-  if (varY < 0) varY = 0;
-  if (varZ < 0) varZ = 0;
+    double varX = (qX - (sX * sX) / n) / (n - 1);
+    double varY = (qY - (sY * sY) / n) / (n - 1);
+    double varZ = (qZ - (sZ * sZ) / n) / (n - 1);
+    if (varX < 0) varX = 0;
+    if (varY < 0) varY = 0;
+    if (varZ < 0) varZ = 0;
 
-  sigmaResultantMv = sqrt(varX + varY + varZ);
+    sigmaResultantG = sqrt(varX + varY + varZ);
+    gravityG = sqrtf(biasX * biasX + biasY * biasY + biasZ * biasZ);
+  } else {
+    sigmaResultantG = 0;
+    gravityG = 0;
+  }
 
-  float thresholdG = (SIGMA_MULTIPLIER * sigmaResultantMv) / MV_PER_G;
+  float thresholdG = SIGMA_MULTIPLIER * sigmaResultantG;
   triggerG = max(thresholdG, MIN_TRIGGER_G);
+  triggerG = min(triggerG, MAX_TRIGGER_G);
   onsetG   = triggerG * ONSET_FRACTION;
 
   bufPrimed = false;
+  checkCalibrationHealth(failed);
   printCalibration();
 
-  lcdTwoLines("SIREN ready", "Monitoring...");
+  if (!mpuReady)               lcdTwoLines("MPU6050 missing", "Check SDA/SCL");
+  else if (calibrationSuspect) lcdTwoLines("Check sensor", "See serial log");
+  else                         lcdTwoLines("S.I.R.E.N. ready", "Monitoring...");
   setLeds(true, false, false);
+  nextSampleUs = micros();
 }
 
+// ---------------------------------------------------------------------------
+// Network and Firebase
+// ---------------------------------------------------------------------------
 void connectWifi() {
   Serial.printf("WiFi: connecting to %s\n", WIFI_SSID);
   WiFi.mode(WIFI_STA);
@@ -423,275 +586,8 @@ void uploadAlert(const char* band, float g) {
 }
 
 // ---------------------------------------------------------------------------
-// SIM800L driver
-//
-// Sending an SMS takes seconds and can take half a minute on a weak cell, so
-// the dispatch is a state machine pumped from loop() rather than a blocking
-// call. Blocking here would freeze the 200 Hz sampler during the exact window
-// an aftershock is most likely, and would overrun ALERT_HOLD_MS.
+// Alerting
 // ---------------------------------------------------------------------------
-#if SIM800L_ENABLED
-
-const uint8_t  SIM_MAX_RECIPIENTS    = 5;
-const uint32_t SIM_PROMPT_TIMEOUT_MS = 8000;
-const uint32_t SIM_SEND_TIMEOUT_MS   = 30000;
-
-String   simNumbers[SIM_MAX_RECIPIENTS];
-uint8_t  simNumberCount = 0;
-bool     simPresent     = false;
-uint32_t simLastSmsAtMs = 0;
-bool     simEverSent    = false;
-
-enum SmsState { SMS_IDLE, SMS_WAIT_PROMPT, SMS_WAIT_ACK };
-SmsState smsState    = SMS_IDLE;
-uint8_t  smsNext     = 0;   // recipient currently being sent
-uint8_t  smsQueued   = 0;   // size of this batch; smsNext < smsQueued == work pending
-String   smsBody;
-uint32_t smsDeadline = 0;
-String   simRx;             // rolling buffer for the non-blocking path
-
-void simResetRx() {
-  while (simSerial.available()) simSerial.read();
-  simRx = "";
-}
-
-void simDrain() {
-  while (simSerial.available()) {
-    simRx += (char)simSerial.read();
-    if (simRx.length() > 300) simRx.remove(0, simRx.length() - 300);
-  }
-}
-
-// Blocking — only ever used at boot and from the serial console, never while
-// an alert is being handled.
-bool simWaitFor(const char* token, uint32_t timeoutMs, String* captured = nullptr) {
-  uint32_t start = millis();
-  String buf;
-  while (millis() - start < timeoutMs) {
-    while (simSerial.available()) {
-      buf += (char)simSerial.read();
-      if (buf.length() > 300) buf.remove(0, buf.length() - 300);
-      if (buf.indexOf(token) >= 0)   { if (captured) *captured = buf; return true;  }
-      if (buf.indexOf("ERROR") >= 0) { if (captured) *captured = buf; return false; }
-    }
-    delay(2);
-  }
-  if (captured) *captured = buf;
-  return false;
-}
-
-bool simCmd(const char* cmd, const char* expect, uint32_t timeoutMs, String* captured = nullptr) {
-  simResetRx();
-  simSerial.println(cmd);
-  return simWaitFor(expect, timeoutMs, captured);
-}
-
-void simParseRecipients() {
-  simNumberCount = 0;
-  String all = String(SIM_RECIPIENTS);
-  all.trim();
-  int from = 0;
-  while (from <= (int)all.length() && simNumberCount < SIM_MAX_RECIPIENTS) {
-    int comma = all.indexOf(',', from);
-    String one = (comma < 0) ? all.substring(from) : all.substring(from, comma);
-    one.trim();
-    if (one.length()) simNumbers[simNumberCount++] = one;
-    if (comma < 0) break;
-    from = comma + 1;
-  }
-}
-
-int simSignal() {                 // 0-31, or 99 when unknown
-  String resp;
-  if (!simCmd("AT+CSQ", "+CSQ:", 3000, &resp)) return 99;
-  int i = resp.indexOf("+CSQ:");
-  if (i < 0) return 99;
-  int c = resp.indexOf(',', i);
-  if (c < 0) return 99;
-  return resp.substring(i + 5, c).toInt();
-}
-
-int simRegistration() {           // 1 = registered home, 5 = roaming
-  String resp;
-  if (!simCmd("AT+CREG?", "+CREG:", 3000, &resp)) return -1;
-  int i = resp.indexOf("+CREG:");
-  if (i < 0) return -1;
-  int c = resp.indexOf(',', i);
-  if (c < 0) return -1;
-  return resp.substring(c + 1, c + 2).toInt();
-}
-
-bool simInit() {
-  simParseRecipients();
-  simSerial.begin(9600, SERIAL_8N1, PIN_SIM_RX, PIN_SIM_TX);
-  delay(500);
-
-  simPresent = false;
-  for (uint8_t i = 0; i < 6 && !simPresent; i++) {
-    if (simCmd("AT", "OK", 1200)) simPresent = true;
-    else delay(800);
-  }
-
-  if (!simPresent) {
-    Serial.println("SIM,ERR,no reply to AT");
-    Serial.println("SIM,HINT,supply must hold 3.4-4.4V at 2A peak; check TX/RX are crossed; baud 9600");
-    lcdTwoLines("SIM800L no reply", "check power/wire");
-    delay(1500);
-    return false;
-  }
-
-  simCmd("ATE0", "OK", 1500);                  // echo off, or every reply is doubled
-  simCmd("AT+CMEE=2", "OK", 1500);             // verbose errors
-  simCmd("AT+CNMI=0,0,0,0,0", "OK", 1500);     // do not push incoming SMS at us mid-alert
-  simCmd("AT+CSCS=\"GSM\"", "OK", 1500);
-
-  if (!simCmd("AT+CMGF=1", "OK", 3000)) {
-    Serial.println("SIM,ERR,SMS text mode refused -- SIM may be missing or PIN-locked");
-    return false;
-  }
-
-  int reg = -1, csq = 99;
-  uint32_t start = millis();
-  while (millis() - start < 20000) {
-    reg = simRegistration();
-    csq = simSignal();
-    if ((reg == 1 || reg == 5) && csq != 99 && csq >= 5) break;
-    delay(1500);
-  }
-
-  Serial.printf("SIM,READY,reg=%d,csq=%d,recipients=%u\n", reg, csq, simNumberCount);
-  if (reg != 1 && reg != 5)
-    Serial.println("SIM,WARN,not registered -- SIM seated? PIN disabled? 2G coverage?");
-  if (csq == 99 || csq < 8)
-    Serial.println("SIM,WARN,weak or unknown signal -- is the antenna attached?");
-  if (simNumberCount == 0)
-    Serial.println("SIM,WARN,SIM_RECIPIENTS is empty -- no SMS will ever be sent");
-  return true;
-}
-
-uint8_t bandRank(const char* b) {
-  if (!strcmp(b, "red"))    return 2;
-  if (!strcmp(b, "yellow")) return 1;
-  return 0;
-}
-
-void smsQueueAlert(const char* band, float g) {
-  if (!simPresent || simNumberCount == 0) return;
-  if (bandRank(band) < bandRank(SIM_MIN_BAND)) return;
-
-  if (smsNext < smsQueued) {
-    Serial.println("SIM,SKIP,previous batch still sending");
-    return;
-  }
-  if (simEverSent && (millis() - simLastSmsAtMs) < SIM_SMS_COOLDOWN_MS) {
-    Serial.printf("SIM,SKIP,cooldown,%lus left\n",
-                  (unsigned long)((SIM_SMS_COOLDOWN_MS - (millis() - simLastSmsAtMs)) / 1000));
-    return;
-  }
-
-  char up[8];
-  strncpy(up, band, sizeof(up) - 1);
-  up[sizeof(up) - 1] = '\0';
-  for (char* p = up; *p; ++p) *p = toupper((unsigned char)*p);
-
-  smsBody  = "SIREN ";
-  smsBody += NODE_ID;
-  smsBody += " ";
-  smsBody += up;
-  smsBody += ": peak ";
-  smsBody += String(g, 3);
-  smsBody += "g at ";
-  smsBody += isoNowUtc();
-  smsBody += ". Quake detected by the school sensor. Auto-message, do not reply.";
-
-  smsNext        = 0;
-  smsQueued      = simNumberCount;
-  smsState       = SMS_IDLE;
-  simLastSmsAtMs = millis();
-  simEverSent    = true;
-
-  Serial.printf("SIM,QUEUE,%u recipients,band=%s\n", smsQueued, band);
-}
-
-// "Sent" here means the network accepted the message, exactly as it does in the
-// app. There are no delivery receipts; do not report it as "delivered".
-void pumpSms() {
-  if (!simPresent) return;
-
-  switch (smsState) {
-
-    case SMS_IDLE:
-      if (smsNext >= smsQueued) return;
-      simResetRx();
-      simSerial.print("AT+CMGS=\"");
-      simSerial.print(simNumbers[smsNext]);
-      simSerial.println("\"");
-      smsDeadline = millis() + SIM_PROMPT_TIMEOUT_MS;
-      smsState    = SMS_WAIT_PROMPT;
-      break;
-
-    case SMS_WAIT_PROMPT:
-      simDrain();
-      if (simRx.indexOf('>') >= 0) {
-        simSerial.print(smsBody);
-        simSerial.write(26);                  // Ctrl-Z sends it
-        simRx.remove(0);
-        smsDeadline = millis() + SIM_SEND_TIMEOUT_MS;
-        smsState    = SMS_WAIT_ACK;
-      } else if (simRx.indexOf("ERROR") >= 0 || (int32_t)(millis() - smsDeadline) >= 0) {
-        Serial.printf("SIM,FAIL,%s,no prompt\n", simNumbers[smsNext].c_str());
-        simSerial.write(27);                  // ESC abandons a half-open CMGS
-        smsNext++;
-        smsState = SMS_IDLE;
-      }
-      break;
-
-    case SMS_WAIT_ACK:
-      simDrain();
-      if (simRx.indexOf("+CMGS:") >= 0) {
-        Serial.printf("SIM,SENT,%s\n", simNumbers[smsNext].c_str());
-        smsNext++;
-        smsState = SMS_IDLE;
-      } else if (simRx.indexOf("ERROR") >= 0) {
-        Serial.printf("SIM,FAIL,%s,modem error\n", simNumbers[smsNext].c_str());
-        smsNext++;
-        smsState = SMS_IDLE;
-      } else if ((int32_t)(millis() - smsDeadline) >= 0) {
-        Serial.printf("SIM,FAIL,%s,timeout\n", simNumbers[smsNext].c_str());
-        smsNext++;
-        smsState = SMS_IDLE;
-      }
-      break;
-  }
-}
-
-void simStatusLine() {
-  if (!simPresent) { Serial.println("SIM,STAT,present=0"); return; }
-  Serial.printf("SIM,STAT,present=1,reg=%d,csq=%d,recipients=%u,sending=%d\n",
-                simRegistration(), simSignal(), simNumberCount,
-                smsNext < smsQueued ? 1 : 0);
-}
-
-void simTestSms() {
-  if (!simPresent)            { Serial.println("SIM,ERR,modem not present");     return; }
-  if (simNumberCount == 0)    { Serial.println("SIM,ERR,no recipients");         return; }
-  if (smsNext < smsQueued)    { Serial.println("SIM,ERR,batch already sending"); return; }
-  smsBody   = "SIREN " NODE_ID " test. If you received this, the SMS fallback works. Do not reply.";
-  smsNext   = 0;
-  smsQueued = simNumberCount;
-  smsState  = SMS_IDLE;
-  Serial.printf("SIM,TEST,queued for %u recipients\n", smsQueued);
-}
-
-#else   // SIM800L disabled — no-op stubs so the call sites stay clean
-
-inline void pumpSms() {}
-inline void smsQueueAlert(const char*, float) {}
-inline void simStatusLine() { Serial.println("SIM,STAT,disabled"); }
-inline void simTestSms()    { Serial.println("SIM,ERR,set SIM800L_ENABLED 1 in secrets.h"); }
-
-#endif  // SIM800L_ENABLED
-
 void fireAlert(float g) {
   tAlert = millis();
   const char* band = bandName(g);
@@ -702,14 +598,17 @@ void fireAlert(float g) {
   tLed = millis();
 
   char line2[20];
-
+  // 3 decimals, not 2: the Green band is only 0.010 g wide, so "%.2f" would
+  // round a 0.005 g reading to "0.01 g" -- exactly the Yellow boundary.
   snprintf(line2, sizeof(line2), "%.3f g  %s", g, band);
   if (isRed)         lcdTwoLines("RED - TAKE COVER", line2);
   else if (isYellow) lcdTwoLines("YELLOW - ALERT",   line2);
   else               lcdTwoLines("GREEN - MINOR",    line2);
   tLcd = millis();
 
-  if (isRed) buzzerOn();
+  // Both Yellow and Red sound the alarm. Green is informational only, so it
+  // stays silent -- otherwise the buzzer would fire on every passing footstep.
+  if (isRed || isYellow) buzzerOn();
 
   seq++;
 
@@ -724,11 +623,11 @@ void fireAlert(float g) {
   state = ALERTING;
   tStateEnd = millis() + ALERT_HOLD_MS;
 
-  // Firestore first — it is the fast path when WiFi is up, and it returns
-  // immediately when it is not, so queuing the SMS behind it costs nothing in
-  // the outage case that the SMS exists for.
   uploadAlert(band, g);
-  smsQueueAlert(band, g);
+
+  // The upload blocks for a couple of seconds. Restart the sample clock so
+  // the loop does not race through a backlog of missed samples afterwards.
+  nextSampleUs = micros();
 }
 
 void rejectAsNoise(float g) {
@@ -739,9 +638,39 @@ void rejectAsNoise(float g) {
 void endAlert() {
   buzzerOff();
   setLeds(true, false, false);
-  lcdTwoLines("SIREN ready", "Monitoring...");
+  lcdTwoLines("S.I.R.E.N. ready", "Monitoring...");
   state = COOLDOWN;
   tStateEnd = millis() + COOLDOWN_MS;
+}
+
+// ---------------------------------------------------------------------------
+// Serial console
+// ---------------------------------------------------------------------------
+void printLive() {
+  int16_t rx, ry, rz;
+  if (!readAccelRaw(rx, ry, rz)) {
+    Serial.println("LIVE,ERR,could not read the MPU6050");
+    return;
+  }
+  float gx = rx / LSB_PER_G, gy = ry / LSB_PER_G, gz = rz / LSB_PER_G;
+  // At rest: one axis near +/-1.000 (the one facing up or down), the other
+  // two near 0.000, total near 1.000, and shake_g close to zero.
+  Serial.printf("LIVE,g,%.3f,%.3f,%.3f,total,%.3f,shake_g,%.4f\n",
+                gx, gy, gz, sqrtf(gx * gx + gy * gy + gz * gz), readResultantG());
+}
+
+void scanI2C() {
+  Serial.println("I2C,scan,start");
+  uint8_t found = 0;
+  for (uint8_t a = 1; a < 127; a++) {
+    if (i2cPresent(a)) {
+      const char* what = (a == 0x27 || a == 0x3F) ? "LCD"
+                       : (a == 0x68 || a == 0x69) ? "MPU6050" : "?";
+      Serial.printf("I2C,found,0x%02X,%s\n", a, what);
+      found++;
+    }
+  }
+  Serial.printf("I2C,scan,done,%u device(s)\n", found);
 }
 
 void handleCommand(char c) {
@@ -749,17 +678,17 @@ void handleCommand(char c) {
     case 'C': case 'c': calibrate(); break;
     case 'Z': case 'z': printCalibration(); break;
     case 'S': case 's': endAlert(); break;
+    case 'L': case 'l': printLive(); break;
+    case 'I': case 'i': scanI2C(); break;
     case 'W': case 'w':
       Serial.printf("NET,wifi=%d,ip=%s,authed=%d,epoch=%lu\n",
                     WiFi.status() == WL_CONNECTED ? 1 : 0,
                     WiFi.localIP().toString().c_str(),
                     authed ? 1 : 0, (unsigned long)time(nullptr));
       break;
-    case 'M': case 'm': simStatusLine(); break;
-    case 'T': case 't': simTestSms(); break;
-    case 'G': case 'g': strcpy(lastType, "manual"); tOnset = tDetect = millis(); fireAlert(0.22f); break;
-    case 'Y': case 'y': strcpy(lastType, "manual"); tOnset = tDetect = millis(); fireAlert(0.48f); break;
-    case 'R': case 'r': strcpy(lastType, "manual"); tOnset = tDetect = millis(); fireAlert(0.85f); break;
+    case 'G': case 'g': strcpy(lastType, "manual"); tOnset = tDetect = millis(); fireAlert(0.005f); break;
+    case 'Y': case 'y': strcpy(lastType, "manual"); tOnset = tDetect = millis(); fireAlert(0.050f); break;
+    case 'R': case 'r': strcpy(lastType, "manual"); tOnset = tDetect = millis(); fireAlert(0.300f); break;
     default: break;
   }
 }
@@ -772,6 +701,9 @@ void pumpConsole() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Setup and main loop
+// ---------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -780,45 +712,32 @@ void setup() {
   pinMode(PIN_LED_YELLOW, OUTPUT);
   pinMode(PIN_LED_RED,    OUTPUT);
   pinMode(PIN_BUZZER,     OUTPUT);
+  pinMode(PIN_BUZZER2,    OUTPUT);
   buzzerOff();
-
-  analogReadResolution(12);
-  // ADC_11db is the correct symbol on both core 2.x and 3.x — the Arduino layer
-  // exports {ADC_0db, ADC_2_5db, ADC_6db, ADC_11db, ADC_ATTENDB_MAX} and nothing
-  // else. ADC_ATTEN_DB_12 is an ESP-IDF name, so the version-gated branch that
-  // used it failed to compile on exactly the 3.x cores it was meant for.
-  analogSetAttenuation(ADC_11db);
 
   Wire.begin(PIN_SDA, PIN_SCL);
   lcd.init();
   lcd.backlight();
-  lcdTwoLines("SIREN", "Booting...");
+  lcdTwoLines("S.I.R.E.N.", "Booting...");
 
   setLeds(true, true, true); delay(400); setLeds(false, false, false);
 
-  Serial.println("\nBOOT,siren-esp32,v2.0-singleboard");
+  Serial.println("\nBOOT,siren-esp32,v3.0-mpu6050");
   Serial.printf("node=%s project=%s\n", NODE_ID, FIREBASE_PROJECT_ID);
   Serial.println("HEADER,seq,type,peak_g,intensity,detect_ms,process_ms,led_ms,lcd_ms,total_ms");
+
+  mpuInit();
 
   connectWifi();
   syncClock();
   signIn();
 
-#if SIM800L_ENABLED
-  lcdTwoLines("SIREN", "GSM starting...");
-  simInit();
-#else
-  Serial.println("SIM,disabled,SIM800L_ENABLED=0");
-#endif
-
   delay(1500);
   calibrate();
-  nextSampleUs = micros();
 }
 
 void loop() {
   pumpConsole();
-  pumpSms();
 
   static uint32_t lastCheck = 0;
   if (millis() - lastCheck > 30000) {
@@ -843,6 +762,8 @@ void loop() {
         tDetect      = now;
         peakG        = g;
         samplesAbove = 1;
+        sumG         = g;
+        countG       = 1;
         strcpy(lastType, "shake");
         state = CONFIRMING;
       }
@@ -850,9 +771,11 @@ void loop() {
 
     case CONFIRMING:
       if (g > peakG) peakG = g;
+      sumG += g;
+      countG++;
       if (g >= triggerG && samplesAbove < 255) samplesAbove++;
       if (now - tDetect >= CONFIRM_MS) {
-        if (samplesAbove >= MIN_SAMPLES_ABOVE) fireAlert(peakG);
+        if (samplesAbove >= MIN_SAMPLES_ABOVE) fireAlert(sumG / countG);
         else { rejectAsNoise(peakG); tOnset = 0; }
       }
       break;
@@ -867,6 +790,8 @@ void loop() {
         state  = IDLE;
         tOnset = 0;
         peakG  = 0;
+        sumG   = 0;
+        countG = 0;
         nextSampleUs = micros();
       }
       break;
