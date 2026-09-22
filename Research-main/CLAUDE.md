@@ -39,11 +39,11 @@ root, which is `Research-main/` until that is done.
 | `:shared` | ✅ Compose Multiplatform library. All UI, models and the data layer. `compileCommonMainKotlinMetadata` and `compileAndroidMain` both pass. |
 | `:app` | ⚠️ Thin Android host (3 files). Builds only where `app/google-services.json` has been restored — see **Secrets**. |
 | `iosApp/` | ⚠️ Swift sources + Podfile written, **never compiled**. Needs a Mac — see below. |
-| `firmware/` | ⚠️ The committed sketch is still **v2.0, ADXL335**. The board now runs **v3.0-mpu6050**, which has not been committed yet. See **Firmware**. |
+| `firmware/` | ✅ **v3.0-mpu6050**, committed 23 Sep 2026, matching the board. The v2.0 ADXL335 sketch — and the optional SIM800L GSM-SMS fallback that only it carried — stay in history at `fcff24a`. See **Firmware**. |
 | Shipped APK | `dist/` holds **v2.9.2** debug and release. The next build is **v3.0.0** — see **Shipping an APK**. |
 
 ```powershell
-$env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot"
+$env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot"   # per-machine
 $env:ANDROID_HOME="$env:LOCALAPPDATA\Android\Sdk"
 $env:Path="$env:JAVA_HOME\bin;$env:Path"
 cd <repo root>          # wherever this clone lives
@@ -53,6 +53,14 @@ cd <repo root>          # wherever this clone lives
 .\gradlew.bat :shared:compileCommonMainKotlinMetadata   # type-checks common code for BOTH platforms
 .\gradlew.bat :shared:compileAndroidMain               # type-checks shared/src/androidMain
 ```
+
+**The `JAVA_HOME` path above is that machine's, not a requirement.** Any JDK 17 works —
+the 23 Sep 2026 debug build was made with Azul Zulu 17.0.18 at
+`C:\Program Files\Zulu\zulu-17`. Check what a machine actually has with
+`(Get-Command java).Source` before assuming the toolchain is missing. `compileSdk 37`
+resolved without a manual `sdkmanager` step on a machine whose newest installed
+platform was `android-36.1` and which had no `cmdline-tools` at all, so try the build
+before working through the SDK bootstrap below.
 
 The two `:shared` tasks are the fastest way to verify shared code without a Mac —
 and, more usefully, **without `google-services.json`**. Only `:app` applies the
@@ -138,12 +146,18 @@ Each of these cost a debugging cycle:
   ships with **zero** asset entries and only iOS gets assembled resources. `:app`
   works around this with `CopyComposeResourcesTask` + `variant.sources.assets
   .addGeneratedSourceDirectory`, which puts them at
-  `assets/composeResources/siren.shared.generated.resources/`. **Without that the app
+  `assets/composeResources/com.siren.mobile.resources/`. **Without that the app
   compiles but every icon and font fails at runtime.** Verify after changing
   resources:
   ```powershell
-  # expect 28 icons + 5 fonts
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $apk = Resolve-Path .\app\build\outputs\apk\debug\app-debug.apk
+  $z = [IO.Compression.ZipFile]::OpenRead($apk)
+  @($z.Entries | ? { $_.FullName -like '*composeResources*' -and $_.Name -like 'ic_sg_*' }).Count  # 28
+  @($z.Entries | ? { $_.FullName -like '*composeResources*' -and $_.Name -like '*.ttf' }).Count    # 5
+  $z.Dispose()
   ```
+  Verified against the 23 Sep 2026 debug build: 28 and 5.
 - **AGP 9 forbids `Provider`s in the SourceSet API** (`assets.srcDir(provider)`), and
   `addGeneratedSourceDirectory` requires a task exposing a `DirectoryProperty` —
   a plain `Copy` task will not do.
@@ -297,11 +311,17 @@ three at once, which reads as a hardware fault in the firmware and is not one.
 
 ### Firmware state
 
-`firmware/siren_esp32/siren_esp32.ino` in the repo is **v2.0 and reads the ADXL335 on
-GPIO 34/35/32**. The board runs **v3.0-mpu6050**, which is not committed. Commit the
-running sketch before changing anything else, so the repo stops disagreeing with the
-hardware. It compiles clean for `esp32:esp32:esp32`: about 82% of program storage and
+`firmware/siren_esp32/siren_esp32.ino` is **v3.0-mpu6050** and matches the board, as of
+23 Sep 2026. It compiles clean for `esp32:esp32:esp32`: about 82% of program storage and
 15% of dynamic memory.
+
+The sketch it replaced, **v2.0-singleboard**, read the ADXL335 on GPIO 34/35/32 and also
+carried an optional **SIM800L GSM-SMS fallback** for when WiFi is down, off by default
+and switched on from `secrets.h`. **v3.0 has no SIM800L code at all.** If that fallback
+is ever wanted back, it is in history at `fcff24a` and has to be ported forward, not
+just restored — the sensor layer underneath it changed completely. The four `SIM_*`
+defines still sitting in `secrets.h.example` are leftovers from it and are read by
+nothing; harmless, but they document a feature the sketch no longer has.
 
 ---
 
@@ -667,7 +687,8 @@ all three fail at runtime rather than at build time:
    | Build | SHA-256 | Since |
    |---|---|---|
    | release (`siren-release.jks`) | `BA:20:E1:93:A4:8A:A7:81:46:76:B9:A6:EB:40:DE:16:F4:47:33:46:1A:A6:96:82:60:09:09:B7:A2:88:50:7D` | 2.9.2 |
-   | debug (`~/.android/debug.keystore`, this machine) | `84:CB:0A:7B:D6:B4:24:22:52:4E:F2:8A:54:79:C6:BF:B0:EE:37:49:0A:81:AF:14:7B:79:3D:97:C5:8C:10:88` | 2.9.2 |
+   | debug (`~/.android/debug.keystore`, **the machine this file was written on**) | `84:CB:0A:7B:D6:B4:24:22:52:4E:F2:8A:54:79:C6:BF:B0:EE:37:49:0A:81:AF:14:7B:79:3D:97:C5:8C:10:88` | 2.9.2 |
+   | debug (`~/.android/debug.keystore`, **the Windows machine holding the zip-seeded clone**) | `0F:57:86:B9:D3:2D:77:FB:D7:05:92:0C:B0:68:CA:03:0C:18:0A:1D:5C:FE:57:FD:20:8B:DD:8D:8B:04:A1:46` | 23 Sep 2026 |
    | release — **superseded**, signed 2.8.0–2.9.1 | `EF:2E:14:D5:A2:C4:4D:19:72:58:CD:A7:8D:50:18:57:63:C7:ED:60:FD:77:6A:5E:EE:CC:CC:8B:1F:C8:8D:FC` | — |
    | debug — superseded, signed 2.8.0–2.9.1 | `84:45:C3:F4:A6:C4:F4:D8:23:72:FC:84:D6:84:30:BF:52:4B:2B:71:2B:9A:F8:1C:DD:AC:C0:60:22:44:60:11` | — |
 
@@ -1020,21 +1041,44 @@ it comes out unsigned without complaining.
 
 ## The release signing key — do not generate another one
 
-**This key has now been lost and regenerated three times.** Each loss forces every
+**This key has now been lost and regenerated four times.** Each loss forces every
 person holding an installed copy to uninstall it by hand before they can update,
 because Android refuses to install over an APK signed with a different key and
 reports only "App not installed" without saying why. Before running `keytool` for
 any reason, assume the key already exists and go looking for it.
 
-| | |
-|---|---|
-| File | `siren-release.jks` in the repo root — **gitignored, exists on one machine** |
-| Password | in `keystore.properties`, also in the repo root, also gitignored |
-| Alias | `siren` |
-| Key | 4096-bit RSA, SHA384withRSA |
-| Generated | 19 Aug 2026, valid to 11 Aug 2056 |
-| SHA-256 | `BA:20:E1:93:A4:8A:A7:81:46:76:B9:A6:EB:40:DE:16:F4:47:33:46:1A:A6:96:82:60:09:09:B7:A2:88:50:7D` |
-| SHA-1 | `B5:01:DE:AF:ED:32:C7:28:DD:2C:11:DC:0A:91:51:43:E1:C0:94:64` |
+**There are currently two keys, and which one to use is an open decision.**
+
+| | Original — signed every shipped APK | Replacement — has signed nothing |
+|---|---|---|
+| Status | **missing**, not found on any machine searched | on disk, unused |
+| File | `siren-release.jks`, repo root, gitignored | `siren-release.jks`, repo root, gitignored |
+| Backup | none known | `C:\Users\franc\SIREN-release-key\` (one machine, not synced) |
+| Alias | `siren` | `siren` |
+| Key | 4096-bit RSA, SHA384withRSA | 4096-bit RSA, SHA384withRSA |
+| Generated | 19 Aug 2026, valid to 11 Aug 2056 | 23 Sep 2026, valid to 15 Sep 2056 |
+| SHA-256 | `BA:20:E1:93:A4:8A:A7:81:46:76:B9:A6:EB:40:DE:16:F4:47:33:46:1A:A6:96:82:60:09:09:B7:A2:88:50:7D` | `7C:7F:59:A7:DD:0D:C3:41:62:74:9A:BB:A8:1B:C9:1C:92:C6:02:1F:B3:39:82:0E:BF:95:28:4D:0E:13:48:73` |
+| SHA-1 | `B5:01:DE:AF:ED:32:C7:28:DD:2C:11:DC:0A:91:51:43:E1:C0:94:64` | `E8:19:33:AE:42:E7:92:31:93:99:CD:1B:3B:40:75:A7:6A:92:74:4E` |
+| In Firebase | registered | **not registered yet** |
+
+Both carry the same DN — `CN=SIREN, OU=Practical Research 2, O=City of Bogo Senior High
+School, L=Bogo City, ST=Cebu, C=PH` — so the DN does **not** tell them apart. Only the
+fingerprint does.
+
+**Prefer the original if it is ever found.** v2.9.2 and everything before it are signed
+with it, and the school, the panel and classmates are holding those installs. The first
+release signed with `7C:7F:59…` locks every one of them out of updating until they
+uninstall by hand, which also wipes their locally stored settings — emergency contacts,
+`seededDefaults`, `hasAccount`. Firebase accounts survive, being server-side. Register
+the replacement's SHA-256 in the console before shipping anything signed with it, or
+phone sign-up fails on release builds with "This app is not authorized".
+
+**Why this keeps happening**, so the fifth time can be avoided: the key only ever exists
+on the one disk that built the last release, it is gitignored so no clone or zip export
+carries it, and the project moves between machines constantly. A clone on a new machine
+always starts with no key. Storing it somewhere that follows the *person* — a password
+manager attachment, an encrypted synced archive — is the fix; `keystore.properties` must
+travel with the `.jks`, because either file alone is useless.
 
 **The password is deliberately not written here.** This file is committed; the
 keystore's value depends on the password not living beside a public description of
