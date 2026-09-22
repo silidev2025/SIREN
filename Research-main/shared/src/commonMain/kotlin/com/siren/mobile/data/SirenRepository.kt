@@ -1152,17 +1152,27 @@ object SirenRepository {
      * `detectedAt` is the arrival time rather than the detection time; the Firestore copy
      * carries the real one and overwrites this within a second on a healthy connection.
      */
-    fun showAlertFromPush(alertId: String, intensity: Intensity, magnitudeG: Double) {
+    fun showAlertFromPush(
+        alertId: String,
+        intensity: Intensity,
+        magnitudeG: Double,
+        source: AlertSource = AlertSource.ESP32,
+    ) {
         // FCM redelivers, and a redelivered push for an alert the student has already
         // answered and cleared must not put it back on their screen.
         if (alertId in dismissedAlertIds) return
         if (_incomingAlert.value?.id != alertId) {
+            // The source has to come off the push rather than be assumed. Demo Mode writes
+            // a real alerts document that fans out to every device, so assuming ESP32 here
+            // paints a simulation as a genuine earthquake -- unbadged -- until the Firestore
+            // copy lands and corrects it. On the cold-started, locked, possibly offline
+            // phone this path exists for, that window is the whole event.
             _incomingAlert.value = AlertRecord(
                 id = alertId,
                 intensity = intensity,
                 magnitudeG = magnitudeG,
                 detectedAt = Platform.services.nowMillis(),
-                source = AlertSource.ESP32,
+                source = source,
             )
         }
         showAlertById(alertId)

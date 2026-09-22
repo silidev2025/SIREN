@@ -4,6 +4,7 @@ import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.siren.mobile.data.SirenRepository
+import com.siren.mobile.model.AlertSource
 import com.siren.mobile.model.Intensity
 import com.siren.mobile.platform.Platform
 
@@ -28,7 +29,13 @@ class SirenMessagingService : FirebaseMessagingService() {
             ?.let { Intensity.fromName(it) }
             ?: Intensity.fromMagnitude(magnitude)
 
-        Log.i("SirenMessaging", "alert $alertId $intensity ${magnitude}g")
+        // Demo Mode writes a real alerts document, so drills fan out to every device
+        // exactly like genuine events. Carrying the source on the push is what lets the
+        // alert screen badge a simulation before the Firestore copy arrives; defaulting
+        // to ESP32 would show a drill as a real earthquake on a cold-started phone.
+        val source = AlertSource.fromName(data["source"])
+
+        Log.i("SirenMessaging", "alert $alertId $intensity ${magnitude}g source=$source")
 
         Platform.services.startAlarm(
             alertId,
@@ -38,7 +45,7 @@ class SirenMessagingService : FirebaseMessagingService() {
         )
 
         if (intensity != Intensity.GREEN) {
-            SirenRepository.showAlertFromPush(alertId, intensity, magnitude)
+            SirenRepository.showAlertFromPush(alertId, intensity, magnitude, source)
         }
     }
 }

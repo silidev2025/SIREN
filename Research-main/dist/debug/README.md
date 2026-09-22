@@ -16,9 +16,31 @@ named `SIREN-v<version>-debug.apk`.
 
 | File | Version | Size | Built |
 |---|---|---|---|
-| `SIREN-v2.9.2-debug.apk` | 2.9.2 (versionCode 9) | 25.7 MB | 19 Aug 2026 |
+| `SIREN-v3.0.0-debug.apk` | 3.0.0 (versionCode 10) | 25.7 MB | 23 Sep 2026 |
 
-**2.9.2 moves Demo Mode off the student account** onto the teacher and parent dashboards.
+**3.0.0 carries the app half of background push** (Next phase 0). The fix itself is a
+Cloud Function in `functions/` that fans a new `alerts` document out to the FCM `alerts`
+topic; until it is deployed, an app that has been swiped away receives nothing at all.
+
+The app change is small but not optional. `showAlertFromPush` hardcoded
+`source = AlertSource.ESP32`, which was harmless while nothing ever sent a push. Once
+alerts fan out, a **Demo Mode drill would render as a real earthquake** — unbadged —
+until the Firestore copy landed and corrected it, and on the cold-started locked phone
+that path exists for, that window is the whole event. The source now travels on the push
+and `SirenMessagingService` reads it.
+
+**This build is signed with a different debug key than 2.9.2 was** —
+`0F:57:86:B9:…:A1:46`, registered in Firebase on 23 Sep 2026. `debug.keystore` is
+per-machine and this is a different machine; both keys are registered, so phone sign-up
+works on either.
+
+**It will not install over an existing SIREN.** `applicationIdSuffix` is empty, so debug
+and release share `com.research.siren` while carrying different signatures. Android
+refuses the install and reports only "App not installed". Uninstall first — which also
+clears locally stored settings (emergency contacts, `seededDefaults`, `hasAccount`).
+Firebase accounts are server-side and survive.
+
+**2.9.2 moved Demo Mode off the student account** onto the teacher and parent dashboards.
 Triggering a drill writes a real `alerts` document that fans out to every device on the
 `alerts` topic, so it belongs with the person running the drill rather than one of the
 students receiving it.
