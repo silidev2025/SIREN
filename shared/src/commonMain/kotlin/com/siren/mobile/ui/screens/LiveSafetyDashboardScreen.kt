@@ -26,10 +26,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.siren.mobile.model.AlertRecord
+import com.siren.mobile.model.FeedCheck
 import com.siren.mobile.model.LinkedPerson
 import com.siren.mobile.model.ResponseStatus
 import com.siren.mobile.ui.components.EmptyState
 import com.siren.mobile.ui.components.ListGroup
+import com.siren.mobile.ui.components.OfficialDataCard
 import com.siren.mobile.ui.components.Pill
 import com.siren.mobile.ui.components.PrimaryButton
 import com.siren.mobile.ui.components.RowDivider
@@ -48,6 +50,8 @@ fun LiveSafetyDashboardScreen(
     roster: List<LinkedPerson>,
     onCloseEvent: () -> Unit,
     onBack: () -> Unit,
+    feedCheck: FeedCheck? = null,
+    onOpenLocation: (LinkedPerson) -> Unit = {},
 ) {
     val status = SirenTheme.status
     val responded = roster.count { it.status != ResponseStatus.NO_RESPONSE }
@@ -133,6 +137,8 @@ fun LiveSafetyDashboardScreen(
             }
         }
 
+        item { OfficialDataCard(alert, feedCheck) }
+
         if (roster.isNotEmpty()) {
             item { RosterBreakdown(safe = safe, needsHelp = help, noReply = noReply) }
         }
@@ -151,7 +157,7 @@ fun LiveSafetyDashboardScreen(
             item {
                 ListGroup {
                     roster.forEachIndexed { i, person ->
-                        RosterRow(person)
+                        RosterRow(person, onOpenLocation = onOpenLocation)
                         if (i < roster.lastIndex) RowDivider()
                     }
                 }

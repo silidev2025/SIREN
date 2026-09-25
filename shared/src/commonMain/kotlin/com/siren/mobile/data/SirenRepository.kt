@@ -4,6 +4,7 @@ import com.siren.mobile.model.AlertRecord
 import com.siren.mobile.model.AlertSource
 import com.siren.mobile.model.DefaultEmergencyContacts
 import com.siren.mobile.model.EmergencyContact
+import com.siren.mobile.model.FeedCheck
 import com.siren.mobile.model.Intensity
 import com.siren.mobile.model.LinkRequest
 import com.siren.mobile.model.LinkRequestStatus
@@ -11,6 +12,7 @@ import com.siren.mobile.model.LinkedPerson
 import com.siren.mobile.model.ResponseStatus
 import com.siren.mobile.model.Role
 import com.siren.mobile.model.SafetyResponse
+import com.siren.mobile.model.SharedLocation
 import com.siren.mobile.model.SirenSettings
 import com.siren.mobile.model.UserProfile
 import com.siren.mobile.platform.Platform
@@ -19,6 +21,7 @@ import com.siren.mobile.platform.PhoneVerification
 import com.siren.mobile.platform.SmsDispatchResult
 import com.siren.mobile.platform.SmsRecipient
 import com.siren.mobile.util.DateFmt
+import com.siren.mobile.util.VoiceAlert
 import dev.gitlive.firebase.Firebase
 import dev.gitlive.firebase.auth.auth
 import dev.gitlive.firebase.firestore.Direction
@@ -109,8 +112,18 @@ object SirenRepository {
     private val _events = MutableSharedFlow<UiMessage>(extraBufferCapacity = 8)
     val events: SharedFlow<UiMessage> = _events.asSharedFlow()
 
+    private val _sharingLocationFor = MutableStateFlow<String?>(null)
+
+    /**
+     * The alert this phone's location is currently shared for, or null. Drives the visible
+     * "sharing your location" indicator — a student must always be able to see that it is
+     * happening, and stop it.
+     */
+    val sharingLocationFor: StateFlow<String?> = _sharingLocationFor.asStateFlow()
+
     private var rosterMembers: List<UserProfile> = emptyList()
     private var rosterResponses: List<SafetyResponse> = emptyList()
+    private var rosterLocations: Map<String, SharedLocation> = emptyMap()
 
     private var profileJob: Job? = null
     private var alertsJob: Job? = null
@@ -118,6 +131,8 @@ object SirenRepository {
     private var rosterMembersJob: Job? = null
     private var rosterRespJob: Job? = null
     private var linkRequestJob: Job? = null
+    private var rosterLocJob: Job? = null
+    private var rosterLocKey: String? = null
 
     private var currentRosterAlertId: String? = null
     private var currentLinkRole: Role? = null
@@ -129,6 +144,20 @@ object SirenRepository {
 
     /** Alerts a help SMS batch has already gone out for, to stop repeat taps re-sending. */
     private val helpSmsSentFor = mutableSetOf<String>()
+
+    /** Alerts the student has stopped sharing their location for. Never re-shared. */
+    private val locationStoppedFor = mutableSetOf<String>()
+
+    /** When a fix was last taken per alert, so repeated triggers cannot hammer the GPS. */
+    private val lastLocationShare = mutableMapOf<String, Long>()
+
+    /** Verdicts already written this session, so each is recorded once. */
+    private val recordedFeedChecks = mutableSetOf<String>()
+
+    private const val LOCATION_MIN_INTERVAL_MS = 60_000L
+
+    /** How long a shared location lives before a Firestore TTL policy may delete it. */
+    private const val LOCATION_TTL_MS = 24L * 60 * 60 * 1000
 
     /** How long to wait for the profile snapshot on a cold start before giving up. */
     private const val PROFILE_WAIT_MS = 10_000L
@@ -441,10 +470,22 @@ object SirenRepository {
                                 newest.intensity,
                                 newest.magnitudeG,
                                 _settings.value.vibration,
+                                alarmSpeech(newest.intensity, newest.magnitudeG, newest.source),
                             )
                         }
                     }
-                    newest?.let { ensureRosterListener(it.id) }
+                    newest?.let {
+                        ensureRosterListener(it.id)
+                        ensureLocationListener(it)
+                    }
+
+                    // Shared only while the event is active: once an adviser closes it, the
+                    // student's own client takes its location back down.
+                    _sharingLocationFor.value?.let { sharedId ->
+                        if (list.firstOrNull { it.id == sharedId }?.closed == true) {
+                            removeMyLocation(sharedId)
+                        }
+                    }
                 }
         }
 
@@ -540,6 +581,9 @@ object SirenRepository {
                 recomputeRoster()
             }
         }
+        // Role, class or linked children may have changed, and with them whose locations
+        // this account may see.
+        _alerts.value.firstOrNull()?.let { ensureLocationListener(it) }
     }
 
     private fun attachLinkRequests(profile: UserProfile) {
@@ -677,6 +721,74 @@ object SirenRepository {
         }
     }
 
+    /**
+     * Watches the shared locations this account is allowed to see for the newest alert: an
+     * adviser sees their own class, a guardian sees each confirmed child, a student sees
+     * nobody's. Nothing is watched once the event is closed, which is what "shared only while
+     * an alert is active" means on the viewing side.
+     *
+     * The adviser query filters on `classId` and the guardian reads one document per child,
+     * rather than either reading the whole subcollection and filtering here — so that
+     * Firestore rules can enforce the same limits (see CLAUDE.md, GPS location).
+     */
+    private fun ensureLocationListener(alert: AlertRecord) {
+        val profile = _user.value
+        val key = listOf(
+            alert.id,
+            alert.closed,
+            profile?.role,
+            profile?.classId,
+            profile?.linkedStudentIds?.sorted(),
+        ).joinToString("|")
+        if (key == rosterLocKey && rosterLocJob != null) return
+        rosterLocKey = key
+        rosterLocJob?.cancel()
+        rosterLocJob = null
+        rosterLocations = emptyMap()
+        recomputeRoster()
+
+        if (profile == null || alert.closed) return
+        val locations = alertsCol.document(alert.id).collection("locations")
+
+        rosterLocJob = when (profile.role) {
+            Role.TEACHER -> {
+                if (profile.classId.isBlank()) return
+                scope.launch {
+                    locations.where { "classId" equalTo profile.classId }.snapshots
+                        .catch { reportListenerError("student locations", it) }
+                        .collect { query ->
+                            rosterLocations = query.documents.mapNotNull { snap ->
+                                runCatching { snap.data(LocationDoc.serializer()).toModel(snap.id) }
+                                    .getOrNull()
+                            }.associateBy { it.userId }
+                            recomputeRoster()
+                        }
+                }
+            }
+
+            Role.PARENT -> {
+                val ids = profile.linkedStudentIds
+                if (ids.isEmpty()) return
+                scope.launch {
+                    combine(ids.map { id -> locations.document(id).snapshots }) { snaps ->
+                        snaps.mapNotNull { snap ->
+                            if (!snap.exists) null
+                            else runCatching { snap.data(LocationDoc.serializer()).toModel(snap.id) }
+                                .getOrNull()
+                        }
+                    }
+                        .catch { reportListenerError("child locations", it) }
+                        .collect { list ->
+                            rosterLocations = list.associateBy { it.userId }
+                            recomputeRoster()
+                        }
+                }
+            }
+
+            Role.STUDENT -> null
+        }
+    }
+
     private fun recomputeRoster() {
         val byUid = rosterResponses.associateBy { it.userId }
         _roster.value = rosterMembers
@@ -689,6 +801,7 @@ object SirenRepository {
                     status = r?.status ?: ResponseStatus.NO_RESPONSE,
                     respondedAt = r?.respondedAt,
                     photo = member.photo,
+                    location = rosterLocations[member.uid],
                 )
             }
             .sortedWith(
@@ -721,6 +834,8 @@ object SirenRepository {
         rosterMembersJob?.cancel(); rosterMembersJob = null
         rosterRespJob?.cancel(); rosterRespJob = null
         linkRequestJob?.cancel(); linkRequestJob = null
+        rosterLocJob?.cancel(); rosterLocJob = null
+        rosterLocKey = null
         currentRosterAlertId = null
         currentLinkRole = null
         alertsInitialised = false
@@ -728,6 +843,7 @@ object SirenRepository {
         lastIncomingId = null
         rosterMembers = emptyList()
         rosterResponses = emptyList()
+        rosterLocations = emptyMap()
 
         _alerts.value = emptyList()
         _myResponses.value = emptyMap()
@@ -740,6 +856,9 @@ object SirenRepository {
             // not inherit this one's dismissals or its "already texted" record.
             dismissedAlertIds.clear()
             helpSmsSentFor.clear()
+            locationStoppedFor.clear()
+            lastLocationShare.clear()
+            _sharingLocationFor.value = null
         }
     }
 
@@ -974,6 +1093,146 @@ object SirenRepository {
                 alertsCol.document(alertId).collection("responses").document(uid).set(payload)
                 usersCol.document(uid).collection("responses").document(alertId).set(payload)
             }.onFailure { notifyUi("Couldn't record your response: ${it.message}", true) }
+        }
+
+        // A fresh fix with the answer — the student may have moved since the alert went up.
+        shareLocationFor(alertId, force = true)
+    }
+
+    /** What the alarm says out loud, or null when the student has turned spoken alerts off. */
+    fun alarmSpeech(intensity: Intensity, magnitudeG: Double, source: AlertSource): String? =
+        if (_settings.value.voiceAlerts) VoiceAlert.phrase(intensity, magnitudeG, source) else null
+
+    /**
+     * Shares this phone's position for [alertId] with the student's confirmed guardians and
+     * adviser, if — and only if — every limit holds: a student, who opted in, who has granted
+     * permission, for an alert that is still open and that they have not stopped sharing.
+     *
+     * Called when the alert comes up on screen and again when the student answers. Never from
+     * the background: the fix needs the app visible, and continuous or background tracking of
+     * minors is deliberately out of scope. Never prompts — the permission is asked for when
+     * the setting is switched on, not during an earthquake.
+     *
+     * @param force take a new fix even inside the minimum interval — used on answering.
+     */
+    fun shareLocationFor(alertId: String, force: Boolean = false) {
+        val profile = _user.value ?: return
+        if (profile.role != Role.STUDENT) return
+        if (!_settings.value.shareLocationDuringAlerts) return
+        val services = Platform.services
+        if (!services.locationSupported || !services.locationPermissionGranted()) return
+        if (alertId in locationStoppedFor) return
+        val alert = _alerts.value.firstOrNull { it.id == alertId }
+            ?: _incomingAlert.value?.takeIf { it.id == alertId }
+        if (alert?.closed == true) return
+
+        val now = services.nowMillis()
+        val last = lastLocationShare[alertId]
+        if (!force && last != null && now - last < LOCATION_MIN_INTERVAL_MS) return
+        lastLocationShare[alertId] = now
+
+        scope.launch {
+            val fix = services.currentLocation()
+            if (fix == null) {
+                lastLocationShare.remove(alertId)
+                return@launch
+            }
+            // The student may have tapped "Stop sharing" while the fix was being taken.
+            if (alertId in locationStoppedFor) return@launch
+            runCatching {
+                alertsCol.document(alertId).collection("locations").document(profile.uid).set(
+                    LocationDoc(
+                        userId = profile.uid,
+                        name = profile.name,
+                        classId = profile.classId,
+                        lat = fix.lat,
+                        lng = fix.lng,
+                        accuracyM = fix.accuracyM,
+                        locatedAt = Timestamp.now(),
+                        // For a Firestore TTL policy on `expiresAt`, if one is enabled: the
+                        // backstop for a location whose event was never formally closed.
+                        expiresAt = Timestamp((now + LOCATION_TTL_MS) / 1000, 0),
+                    )
+                )
+                _sharingLocationFor.value = alertId
+            }.onFailure { notifyUi("Couldn't share your location: ${it.message}", true) }
+        }
+    }
+
+    /** The student's "Stop sharing": deletes the location and never re-shares for this alert. */
+    fun stopSharingLocation(alertId: String) {
+        locationStoppedFor += alertId
+        removeMyLocation(alertId)
+        notifyUi("Location sharing stopped for this alert.")
+    }
+
+    private fun removeMyLocation(alertId: String) {
+        if (_sharingLocationFor.value == alertId) _sharingLocationFor.value = null
+        val uid = auth.currentUser?.uid ?: return
+        scope.launch {
+            runCatching {
+                alertsCol.document(alertId).collection("locations").document(uid).delete()
+            }
+        }
+    }
+
+    /**
+     * Switches location sharing on or off. Turning it on asks for the permission here, while
+     * the app is open and nothing is happening, because an alert is exactly the moment no
+     * dialog can be shown. Returns whether sharing is now on.
+     */
+    suspend fun setShareLocation(enabled: Boolean): Boolean {
+        if (!enabled) {
+            updateSettings { it.copy(shareLocationDuringAlerts = false) }
+            _sharingLocationFor.value?.let { removeMyLocation(it) }
+            return false
+        }
+        val granted = Platform.services.ensureLocationPermission()
+        if (!granted) {
+            notifyUi("Location permission wasn't granted, so sharing stays off.", isError = true)
+            return false
+        }
+        updateSettings { it.copy(shareLocationDuringAlerts = true) }
+        return true
+    }
+
+    /**
+     * Records a final cross-reference verdict against the alert, in its own subcollection
+     * document — never as fields on the alert itself, which older builds would fail to decode
+     * (see CLAUDE.md, Data model). Written by whichever client reaches the verdict first;
+     * every client reaches the same one, so the race is harmless.
+     */
+    internal fun recordFeedCheck(alert: AlertRecord, check: FeedCheck) {
+        if (!recordedFeedChecks.add(alert.id)) return
+        if (auth.currentUser == null) return
+        val doc = when (check) {
+            is FeedCheck.Confirmed -> FeedCheckDoc(
+                status = "confirmed",
+                catalog = check.quake.catalog.label,
+                eventId = check.quake.id,
+                magnitude = check.quake.magnitude,
+                magnitudeType = check.quake.magnitudeType,
+                region = check.quake.region,
+                agency = check.quake.agency,
+                eventTimeMillis = check.quake.time,
+                depthKm = check.quake.depthKm,
+                distanceKm = check.distanceKm,
+                sensorPeis = alert.peisLevel,
+                checkedAt = Timestamp.now(),
+            )
+
+            is FeedCheck.NoMatch -> FeedCheckDoc(
+                status = "unconfirmed",
+                sensorPeis = alert.peisLevel,
+                checkedAt = Timestamp.now(),
+            )
+
+            else -> return
+        }
+        scope.launch {
+            runCatching {
+                alertsCol.document(alert.id).collection("verification").document("feed").set(doc)
+            }.onFailure { recordedFeedChecks.remove(alert.id) }
         }
     }
 
@@ -1346,6 +1605,10 @@ internal data class SettingsDoc(
     val smsPermissionAsked: Boolean = false,
 
     val hasAccount: Boolean = false,
+
+    val shareLocationDuringAlerts: Boolean = false,
+
+    val voiceAlerts: Boolean = true,
 ) {
     fun toModel() = SirenSettings(
         criticalAlerts = criticalAlerts,
@@ -1354,6 +1617,8 @@ internal data class SettingsDoc(
         alertSmsEnabled = alertSmsEnabled,
         smsPermissionAsked = smsPermissionAsked,
         hasAccount = hasAccount,
+        shareLocationDuringAlerts = shareLocationDuringAlerts,
+        voiceAlerts = voiceAlerts,
     )
 
     companion object {
@@ -1365,9 +1630,51 @@ internal data class SettingsDoc(
             alertSmsEnabled = s.alertSmsEnabled,
             smsPermissionAsked = s.smsPermissionAsked,
             hasAccount = s.hasAccount,
+            shareLocationDuringAlerts = s.shareLocationDuringAlerts,
+            voiceAlerts = s.voiceAlerts,
         )
     }
 }
+
+@Serializable
+internal data class LocationDoc(
+    val userId: String = "",
+    val name: String = "",
+    /** The student's class when shared — what an adviser's query and rule filter on. */
+    val classId: String = "",
+    val lat: Double = 0.0,
+    val lng: Double = 0.0,
+    val accuracyM: Double = 0.0,
+    val locatedAt: Timestamp? = null,
+    val expiresAt: Timestamp? = null,
+) {
+    fun toModel(docId: String) = SharedLocation(
+        userId = userId.ifBlank { docId },
+        name = name,
+        lat = lat,
+        lng = lng,
+        accuracyM = accuracyM,
+        locatedAt = locatedAt.toMillis(),
+    )
+}
+
+/** `alerts/{alertId}/verification/feed` — the official-catalogue verdict for one alert. */
+@Serializable
+internal data class FeedCheckDoc(
+    val status: String = "unconfirmed",
+    val catalog: String = "",
+    val eventId: String = "",
+    val magnitude: Double? = null,
+    val magnitudeType: String = "",
+    val region: String = "",
+    val agency: String = "",
+    val eventTimeMillis: Long? = null,
+    val depthKm: Double? = null,
+    val distanceKm: Double? = null,
+    /** The node's own intensity estimate, stored beside the catalogue's magnitude. */
+    val sensorPeis: Int = 0,
+    val checkedAt: Timestamp? = null,
+)
 
 @Serializable
 internal data class ContactDoc(

@@ -42,6 +42,7 @@ class SirenMessagingService : FirebaseMessagingService() {
             intensity,
             magnitude,
             SirenRepository.settings.value.vibration,
+            SirenRepository.alarmSpeech(intensity, magnitude, source),
         )
 
         if (intensity != Intensity.GREEN) {

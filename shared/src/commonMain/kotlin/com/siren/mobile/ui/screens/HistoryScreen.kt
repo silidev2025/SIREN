@@ -11,8 +11,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Sos
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.FilterChip
@@ -31,10 +33,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.siren.mobile.model.AlertRecord
 import com.siren.mobile.model.AlertSource
+import com.siren.mobile.model.FeedCheck
 import com.siren.mobile.model.ResponseStatus
 import com.siren.mobile.model.SafetyResponse
 import com.siren.mobile.ui.components.BannerTone
 import com.siren.mobile.ui.components.EmptyState
+import com.siren.mobile.ui.components.FeedCheckTag
 import com.siren.mobile.ui.components.InfoBanner
 import com.siren.mobile.ui.components.ListGroup
 import com.siren.mobile.ui.components.ListRow
@@ -61,6 +65,8 @@ fun HistoryScreen(
     myResponses: Map<String, SafetyResponse>,
     loading: Boolean = false,
     onBack: (() -> Unit)? = null,
+    feedChecks: Map<String, FeedCheck> = emptyMap(),
+    onOpenOfficialQuakes: (() -> Unit)? = null,
 ) {
     var filter by remember { mutableStateOf(HistoryFilter.ALL) }
 
@@ -82,6 +88,33 @@ fun HistoryScreen(
         verticalArrangement = Arrangement.spacedBy(Space.m),
     ) {
         item { ScreenHeader(title = "Alert history", onBack = onBack) }
+
+        onOpenOfficialQuakes?.let { open ->
+            item {
+                ListGroup {
+                    ListRow(
+                        title = "Recent earthquakes",
+                        subtitle = "Official catalogue data (EMSC / USGS) — the independent check on these alerts",
+                        onClick = open,
+                        leading = {
+                            Icon(
+                                Icons.Filled.Public,
+                                contentDescription = null,
+                                Modifier.size(24.dp),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        trailing = {
+                            Icon(
+                                Icons.Filled.ChevronRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        },
+                    )
+                }
+            }
+        }
 
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(Space.s)) {
@@ -115,7 +148,7 @@ fun HistoryScreen(
                 item {
                     ListGroup {
                         visible.forEachIndexed { i, alert ->
-                            HistoryRow(alert, myResponses[alert.id])
+                            HistoryRow(alert, myResponses[alert.id], feedChecks[alert.id])
                             if (i < visible.lastIndex) RowDivider()
                         }
                     }
@@ -135,7 +168,7 @@ fun HistoryScreen(
 }
 
 @Composable
-private fun HistoryRow(alert: AlertRecord, response: SafetyResponse?) {
+private fun HistoryRow(alert: AlertRecord, response: SafetyResponse?, check: FeedCheck?) {
     val tint = intensityColor(alert.intensity)
     val status = SirenTheme.status
 
@@ -164,10 +197,11 @@ private fun HistoryRow(alert: AlertRecord, response: SafetyResponse?) {
                 )
 
                 Text(
-                    alert.magnitudeG.asGSpaced(3),
+                    "${alert.peisText} · ${alert.magnitudeG.asGSpaced(3)}",
                     style = MaterialTheme.typography.labelSmall.tabular(),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                FeedCheckTag(check)
                 when (response?.status) {
                     ResponseStatus.SAFE -> ResponseTag("Safe", Icons.Filled.CheckCircle, status.safe, status.safeContainer)
                     ResponseStatus.NEEDS_HELP -> ResponseTag("Helped", Icons.Filled.Sos, status.danger, status.dangerContainer)

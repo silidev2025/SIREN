@@ -46,7 +46,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.siren.mobile.data.LinkResult
+import com.siren.mobile.data.QuakeFeed
 import com.siren.mobile.data.SirenRepository
+import com.siren.mobile.model.AlertSource
 import com.siren.mobile.model.LinkRequestStatus
 import com.siren.mobile.model.Role
 import com.siren.mobile.platform.Platform
@@ -60,6 +62,7 @@ import com.siren.mobile.ui.screens.GuardiansScreen
 import com.siren.mobile.ui.screens.HistoryScreen
 import com.siren.mobile.ui.screens.LiveSafetyDashboardScreen
 import com.siren.mobile.ui.screens.LoginScreen
+import com.siren.mobile.ui.screens.OfficialQuakesScreen
 import com.siren.mobile.ui.screens.ParentDashboardScreen
 import com.siren.mobile.ui.screens.ParentLinkingScreen
 import com.siren.mobile.ui.screens.RoleSelectionScreen
@@ -69,6 +72,7 @@ import com.siren.mobile.ui.screens.SettingsScreen
 import com.siren.mobile.ui.screens.SignUpScreen
 import com.siren.mobile.ui.screens.SplashScreen
 import com.siren.mobile.ui.screens.StudentDashboardScreen
+import com.siren.mobile.ui.screens.StudentLocationScreen
 import com.siren.mobile.ui.screens.TeacherDashboardScreen
 import com.siren.mobile.ui.theme.SirenTheme
 import kotlinx.coroutines.launch
@@ -84,7 +88,9 @@ private sealed interface Dest {
     data object Guide : Dest
     data object Guardians : Dest
     data object Profile : Dest
+    data object Quakes : Dest
     data class Live(val alertId: String) : Dest
+    data class Location(val userId: String) : Dest
 }
 
 private data class NavItem(val dest: Dest, val label: String, val icon: ImageVector)
@@ -134,6 +140,19 @@ private fun AlertOverlay() {
     val canRespond = signedIn
 
     val incoming = incomingAlert
+    val user by repo.user.collectAsState()
+    val sharingLocationFor by repo.sharingLocationFor.collectAsState()
+    val feedChecks by QuakeFeed.checks.collectAsState()
+
+    // The alert is on screen, so the app is visible: the one moment a student's location
+    // can be taken without background access. Keyed on the profile too, because on a push
+    // cold start the alert paints before the profile has loaded.
+    LaunchedEffect(incoming?.id, user?.uid) {
+        incoming?.let { repo.shareLocationFor(it.id) }
+    }
+    LaunchedEffect(incoming?.id) {
+        incoming?.let { QuakeFeed.verify(it) }
+    }
 
     // Without this a Back press finishes the Activity and leaves the alarm looping behind a
     // blank keyguard, with no way back to the alert short of finding the notification. The
@@ -164,6 +183,7 @@ private fun AlertOverlay() {
                         onRespond = { repo.submitMyResponse(incoming.id, it) },
                         onDone = { repo.consumeIncomingAlert() },
                         onBack = { confirming = false },
+                        feedCheck = feedChecks[incoming.id],
                     )
                 } else {
                     AlertScreen(
@@ -174,6 +194,9 @@ private fun AlertOverlay() {
                         onRespond = { repo.submitMyResponse(incoming.id, it) },
                         onConfirmStatus = { confirming = true },
                         onDismiss = { repo.consumeIncomingAlert() },
+                        sharingLocation = sharingLocationFor == incoming.id,
+                        onStopSharingLocation = { repo.stopSharingLocation(incoming.id) },
+                        feedCheck = feedChecks[incoming.id],
                     )
                 }
             }
@@ -201,6 +224,13 @@ private fun AppShell() {
     val guardians by repo.guardians.collectAsState()
     val linkRequests by repo.linkRequests.collectAsState()
     val working by repo.working.collectAsState()
+
+    val feedChecks by QuakeFeed.checks.collectAsState()
+    val recentQuakes by QuakeFeed.recent.collectAsState()
+
+    // Bumped after the location switch is flipped, so the permission is re-read even when the
+    // stored setting itself did not change (re-granting a permission revoked in Android).
+    var locationPermissionTick by remember { mutableStateOf(0) }
 
     val pendingLinkRequests = linkRequests.count { it.status == LinkRequestStatus.PENDING }
 
@@ -337,6 +367,11 @@ private fun AppShell() {
             fullScreen = Platform.services.canUseFullScreenIntent(),
         )
     }
+    val locationPermitted = remember(current, locationPermissionTick) {
+        Platform.services.locationPermissionGranted()
+    }
+
+    fun openLocation(person: com.siren.mobile.model.LinkedPerson) = push(Dest.Location(person.uid))
 
     val tabs = when (profile.role) {
         Role.STUDENT -> listOf(
@@ -431,6 +466,7 @@ private fun AppShell() {
                             onAddStudent = { code -> addStudentToClass(code) },
                             onRemoveStudent = { repo.removeStudentFromClass(it) },
                             onEditProfile = { push(Dest.Profile) },
+                            onOpenLocation = ::openLocation,
                         )
 
                         Role.PARENT -> ParentDashboardScreen(
@@ -443,6 +479,8 @@ private fun AppShell() {
                             onOpenGuide = { push(Dest.Guide) },
                             onOpenDemo = { push(Dest.Demo) },
                             onCall = { Platform.services.dial(it) },
+                            onOpenLocation = ::openLocation,
+                            onOpenOfficialQuakes = { push(Dest.Quakes) },
                         )
                     }
 
@@ -461,6 +499,7 @@ private fun AppShell() {
                             onAddStudent = { code -> addStudentToClass(code) },
                             onRemoveStudent = { repo.removeStudentFromClass(it) },
                             onEditProfile = { push(Dest.Profile) },
+                            onOpenLocation = ::openLocation,
                         )
 
                         else -> ParentDashboardScreen(
@@ -473,13 +512,43 @@ private fun AppShell() {
                             onOpenGuide = { push(Dest.Guide) },
                             onOpenDemo = { push(Dest.Demo) },
                             onCall = { Platform.services.dial(it) },
+                            onOpenLocation = ::openLocation,
+                            onOpenOfficialQuakes = { push(Dest.Quakes) },
                         )
                     }
 
-                    Dest.History -> HistoryScreen(
-                        alerts = alerts,
-                        myResponses = myResponses,
-                        loading = !alertsLoaded,
+                    Dest.History -> {
+                        // Cross-check the most recent sensor alerts only: each check is two
+                        // catalogue requests, and a hundred of them on every visit to this tab
+                        // would be abuse of two free public services.
+                        LaunchedEffect(alerts) {
+                            alerts.asSequence()
+                                .filter { it.source == AlertSource.ESP32 }
+                                .take(10)
+                                .forEach { QuakeFeed.verify(it) }
+                        }
+                        HistoryScreen(
+                            alerts = alerts,
+                            myResponses = myResponses,
+                            loading = !alertsLoaded,
+                            feedChecks = feedChecks,
+                            onOpenOfficialQuakes = { push(Dest.Quakes) },
+                        )
+                    }
+
+                    Dest.Quakes -> {
+                        LaunchedEffect(Unit) { QuakeFeed.refreshRecent() }
+                        OfficialQuakesScreen(
+                            state = recentQuakes,
+                            onRefresh = { QuakeFeed.refreshRecent() },
+                            onBack = { pop() },
+                        )
+                    }
+
+                    is Dest.Location -> StudentLocationScreen(
+                        person = roster.firstOrNull { it.uid == dest.userId },
+                        onOpenMaps = { lat, lng, label -> Platform.services.openMap(lat, lng, label) },
+                        onBack = { pop() },
                     )
 
                     Dest.Settings -> SettingsScreen(
@@ -496,6 +565,13 @@ private fun AppShell() {
                         onFixFullScreenAlerts = { Platform.services.openFullScreenIntentSettings() },
                         onFixNotifications = { Platform.services.openNotificationSettings() },
                         onSignOut = { repo.signOut() },
+                        locationPermissionGranted = locationPermitted,
+                        onSetShareLocation = { enabled ->
+                            scope.launch {
+                                repo.setShareLocation(enabled)
+                                locationPermissionTick++
+                            }
+                        },
                     )
 
                     Dest.Profile -> EditProfileScreen(
@@ -575,11 +651,14 @@ private fun AppShell() {
                                 Text("That event is no longer available.")
                             }
                         } else {
+                            LaunchedEffect(alert.id) { QuakeFeed.verify(alert) }
                             LiveSafetyDashboardScreen(
                                 alert = alert,
                                 roster = roster,
                                 onCloseEvent = { repo.closeEvent(alert.id) },
                                 onBack = { pop() },
+                                feedCheck = feedChecks[alert.id],
+                                onOpenLocation = ::openLocation,
                             )
                         }
                     }

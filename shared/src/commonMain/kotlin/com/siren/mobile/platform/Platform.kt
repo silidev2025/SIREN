@@ -49,6 +49,14 @@ data class SmsDispatchResult(
     val attempted: Int get() = sent + failed
 }
 
+/** One position fix from the phone's own location provider. */
+data class GeoFix(
+    val lat: Double,
+    val lng: Double,
+    val accuracyM: Double,
+    val time: Long,
+)
+
 interface PlatformServices {
 
     val versionName: String
@@ -61,7 +69,18 @@ interface PlatformServices {
     fun showAlertNotification(alertId: String, intensity: Intensity, magnitudeG: Double)
     fun clearNotifications()
 
-    fun startAlarm(alertId: String, intensity: Intensity, magnitudeG: Double, vibrate: Boolean)
+    /**
+     * @param speech spoken once, after the first full cycle of the siren rather than over it,
+     *   or null to stay silent apart from the siren. Composed in common code by `VoiceAlert`
+     *   so both platforms say the same words.
+     */
+    fun startAlarm(
+        alertId: String,
+        intensity: Intensity,
+        magnitudeG: Double,
+        vibrate: Boolean,
+        speech: String? = null,
+    )
 
     fun stopAlarm()
 
@@ -127,6 +146,33 @@ interface PlatformServices {
     val photoPickerSupported: Boolean
 
     suspend fun pickProfilePhoto(): String?
+
+    /**
+     * GETs [url] and returns the body — empty for a 204 — or null on any failure. Never
+     * throws. Sends a User-Agent naming SIREN, which the OpenStreetMap tile servers require
+     * and the seismological feeds appreciate.
+     */
+    suspend fun httpGet(url: String): ByteArray?
+
+    /** False where location sharing is not implemented, which hides the setting entirely. */
+    val locationSupported: Boolean
+
+    fun locationPermissionGranted(): Boolean
+
+    /**
+     * Asks for location permission while the app is open, the same way [ensureSmsPermission]
+     * does and for the same reason: during an alert there may be no Activity to ask from.
+     */
+    suspend fun ensureLocationPermission(): Boolean
+
+    /**
+     * One fresh position fix, or null if none arrives within a few seconds. Never prompts —
+     * only ever called while an alert is up, which is no moment for a permission dialog.
+     */
+    suspend fun currentLocation(): GeoFix?
+
+    /** Hands a coordinate to the phone's own maps app. */
+    fun openMap(lat: Double, lng: Double, label: String)
 }
 
 const val PROFILE_PHOTO_MAX_PX = 256
@@ -141,7 +187,13 @@ private object NoOpPlatformServices : PlatformServices {
     override fun cancelVibration() = Unit
     override fun showAlertNotification(alertId: String, intensity: Intensity, magnitudeG: Double) = Unit
     override fun clearNotifications() = Unit
-    override fun startAlarm(alertId: String, intensity: Intensity, magnitudeG: Double, vibrate: Boolean) = Unit
+    override fun startAlarm(
+        alertId: String,
+        intensity: Intensity,
+        magnitudeG: Double,
+        vibrate: Boolean,
+        speech: String?,
+    ) = Unit
     override fun stopAlarm() = Unit
     override fun dial(phone: String) = Unit
     override fun sendSms(phone: String) = Unit
@@ -176,6 +228,12 @@ private object NoOpPlatformServices : PlatformServices {
     override fun openOverlaySettings() = Unit
     override val photoPickerSupported = false
     override suspend fun pickProfilePhoto(): String? = null
+    override suspend fun httpGet(url: String): ByteArray? = null
+    override val locationSupported = false
+    override fun locationPermissionGranted() = false
+    override suspend fun ensureLocationPermission() = false
+    override suspend fun currentLocation(): GeoFix? = null
+    override fun openMap(lat: Double, lng: Double, label: String) = Unit
 }
 
 object Platform {

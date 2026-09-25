@@ -18,12 +18,14 @@ import androidx.compose.material.icons.filled.ContactEmergency
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.ManageAccounts
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PrivacyTip
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -80,6 +82,8 @@ fun SettingsScreen(
     onFixNotifications: () -> Unit,
     onSignOut: () -> Unit,
     onBack: (() -> Unit)? = null,
+    locationPermissionGranted: Boolean = false,
+    onSetShareLocation: (Boolean) -> Unit = {},
 ) {
     var signOutDialog by remember { mutableStateOf(false) }
     var roleDialog by remember { mutableStateOf(false) }
@@ -169,6 +173,30 @@ fun SettingsScreen(
                 subtitle = "Escalates with intensity",
                 checked = settings.vibration,
             ) { v -> onUpdateSettings { it.copy(vibration = v) } }
+            RowDivider()
+            ToggleRow(
+                icon = Icons.Filled.RecordVoiceOver,
+                title = "Spoken alert",
+                subtitle = "Says the intensity and \"drop, cover, and hold on\" once, after the first siren",
+                checked = settings.voiceAlerts,
+            ) { v -> onUpdateSettings { it.copy(voiceAlerts = v) } }
+            if (user.role == Role.STUDENT && Platform.services.locationSupported) {
+                // Checked only when it would actually work: opted in AND still permitted. A
+                // permission revoked in Android settings must not leave a switch that lies.
+                val sharing = settings.shareLocationDuringAlerts && locationPermissionGranted
+                RowDivider()
+                ToggleRow(
+                    icon = Icons.Filled.LocationOn,
+                    title = "Share my location during alerts",
+                    subtitle = when {
+                        settings.shareLocationDuringAlerts && !locationPermissionGranted ->
+                            "Location permission is off — tap to allow it again"
+                        else ->
+                            "Only while an alert is active, only with your confirmed guardians and your adviser"
+                    },
+                    checked = sharing,
+                ) { v -> onSetShareLocation(v) }
+            }
             if (Platform.services.directSmsSupported) {
                 RowDivider()
                 ToggleRow(

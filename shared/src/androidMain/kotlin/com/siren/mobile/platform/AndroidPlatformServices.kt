@@ -10,10 +10,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
+import android.os.CancellationSignal
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -24,6 +28,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
 import com.google.firebase.FirebaseException
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
@@ -34,14 +39,18 @@ import com.google.firebase.messaging.FirebaseMessaging
 import com.siren.mobile.model.Intensity
 import com.siren.mobile.notify.SirenAlarmService
 import com.siren.mobile.util.asGSpaced
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 class AndroidPlatformServices(
@@ -78,6 +87,17 @@ class AndroidPlatformServices(
         /** Long enough for a human to read a permission dialog, short enough not to hang. */
         private const val PERMISSION_TIMEOUT_MS = 120_000L
 
+        /**
+         * How long to wait for a fresh position during an alert. Short: a stale-but-recent
+         * fix beats making the student wait, and [LAST_KNOWN_MAX_AGE_MS] covers the gap.
+         */
+        private const val LOCATION_TIMEOUT_MS = 12_000L
+
+        /** A cached fix younger than this is still worth sending if no fresh one comes. */
+        private const val LAST_KNOWN_MAX_AGE_MS = 5 * 60_000L
+
+        private const val HTTP_TIMEOUT_MS = 15_000
+
         private val smsToken = AtomicInteger(1000)
     }
 
@@ -91,7 +111,13 @@ class AndroidPlatformServices(
         SirenAlarmService.activityClass = activityClass
     }
 
-    override fun startAlarm(alertId: String, intensity: Intensity, magnitudeG: Double, vibrate: Boolean) {
+    override fun startAlarm(
+        alertId: String,
+        intensity: Intensity,
+        magnitudeG: Double,
+        vibrate: Boolean,
+        speech: String?,
+    ) {
 
         if (intensity == Intensity.GREEN) {
             showAlertNotification(alertId, intensity, magnitudeG)
@@ -105,6 +131,7 @@ class AndroidPlatformServices(
             putExtra(SirenAlarmService.EXTRA_INTENSITY, intensity.wire)
             putExtra(SirenAlarmService.EXTRA_MAGNITUDE, magnitudeG)
             putExtra(SirenAlarmService.EXTRA_VIBRATE, vibrate)
+            speech?.let { putExtra(SirenAlarmService.EXTRA_SPEECH, it) }
 
             putExtra(
                 SirenAlarmService.EXTRA_TIMEOUT_MS,
@@ -617,4 +644,107 @@ class AndroidPlatformServices(
 
     override suspend fun pickProfilePhoto(): String? =
         (currentActivity() as? ProfilePhotoPicker)?.pickProfilePhoto()
+
+    override suspend fun httpGet(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        runCatching {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = HTTP_TIMEOUT_MS
+                connection.readTimeout = HTTP_TIMEOUT_MS
+                // OpenStreetMap's tile policy requires an identifying User-Agent; the
+                // default Dalvik one gets tiles refused.
+                connection.setRequestProperty(
+                    "User-Agent",
+                    "SIREN/$versionName (${appContext.packageName}; school earthquake-alert research)",
+                )
+                when (connection.responseCode) {
+                    HttpURLConnection.HTTP_NO_CONTENT -> ByteArray(0)
+                    in 200..299 -> connection.inputStream.use { it.readBytes() }
+                    else -> null
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }.onFailure { Log.w(TAG, "GET failed: $url", it) }.getOrNull()
+    }
+
+    override val locationSupported: Boolean =
+        runCatching {
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_LOCATION)
+        }.getOrDefault(true)
+
+    override fun locationPermissionGranted(): Boolean =
+        listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            .any {
+                ContextCompat.checkSelfPermission(appContext, it) == PackageManager.PERMISSION_GRANTED
+            }
+
+    override suspend fun ensureLocationPermission(): Boolean {
+        if (locationPermissionGranted()) return true
+        val requester = currentActivity() as? LocationPermissionRequester ?: return false
+        return withTimeoutOrNull(PERMISSION_TIMEOUT_MS) { requester.requestLocationPermission() }
+            ?: locationPermissionGranted()
+    }
+
+    override suspend fun currentLocation(): GeoFix? {
+        if (!locationPermissionGranted()) return null
+        val manager = appContext.getSystemService(LocationManager::class.java) ?: return null
+
+        val providers = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(LocationManager.FUSED_PROVIDER)
+            add(LocationManager.GPS_PROVIDER)
+            add(LocationManager.NETWORK_PROVIDER)
+        }.filter { runCatching { manager.isProviderEnabled(it) }.getOrDefault(false) }
+        if (providers.isEmpty()) return null
+
+        val fresh = withTimeoutOrNull(LOCATION_TIMEOUT_MS) {
+            requestFix(manager, providers.first())
+        }
+        val fix = fresh ?: providers
+            .mapNotNull { runCatching { manager.getLastKnownLocation(it) }.getOrNull() }
+            .filter { ageMs(it) <= LAST_KNOWN_MAX_AGE_MS }
+            .minByOrNull { it.accuracy }
+        return fix?.let {
+            GeoFix(it.latitude, it.longitude, it.accuracy.toDouble(), System.currentTimeMillis() - ageMs(it))
+        }
+    }
+
+    private fun ageMs(location: Location): Long =
+        (SystemClock.elapsedRealtimeNanos() - location.elapsedRealtimeNanos) / 1_000_000
+
+    /** One current fix. Suspends until it arrives; cancelled by the caller's timeout. */
+    private suspend fun requestFix(manager: LocationManager, provider: String): Location? =
+        suspendCancellableCoroutine { cont ->
+            val signal = CancellationSignal()
+            cont.invokeOnCancellation { signal.cancel() }
+            runCatching {
+                LocationManagerCompat.getCurrentLocation(
+                    manager,
+                    provider,
+                    signal,
+                    ContextCompat.getMainExecutor(appContext),
+                ) { location -> if (cont.isActive) cont.resume(location) }
+            }.onFailure {
+                Log.w(TAG, "Location request failed", it)
+                if (cont.isActive) cont.resume(null)
+            }
+        }
+
+    override fun openMap(lat: Double, lng: Double, label: String) {
+        val geo = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("geo:$lat,$lng?q=$lat,$lng(${Uri.encode(label)})"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { appContext.startActivity(geo) }.onFailure {
+            // No maps app installed: the OpenStreetMap website works in any browser.
+            runCatching {
+                appContext.startActivity(
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        Uri.parse("https://www.openstreetmap.org/?mlat=$lat&mlon=$lng#map=17/$lat/$lng"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+        }
+    }
 }

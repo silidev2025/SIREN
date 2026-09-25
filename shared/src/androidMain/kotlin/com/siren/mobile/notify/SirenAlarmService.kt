@@ -20,6 +20,8 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -27,6 +29,7 @@ import com.siren.mobile.data.SirenRepository
 import com.siren.mobile.model.Intensity
 import com.siren.mobile.model.ResponseStatus
 import com.siren.mobile.platform.Platform
+import java.util.Locale
 import kotlin.math.ceil
 
 class SirenAlarmService : Service() {
@@ -44,6 +47,7 @@ class SirenAlarmService : Service() {
         const val EXTRA_MAGNITUDE = "magnitude"
         const val EXTRA_TIMEOUT_MS = "timeoutMs"
         const val EXTRA_VIBRATE = "vibrate"
+        const val EXTRA_SPEECH = "speech"
 
         private const val EXTRA_LAUNCH_ALERT_ID = "extra_alert_id"
 
@@ -56,6 +60,17 @@ class SirenAlarmService : Service() {
         // alarm clock raises the stream itself; so does this, and puts it back afterwards.
         private const val VOLUME_FLOOR_RED = 0.9f
         private const val VOLUME_FLOOR_YELLOW = 0.6f
+
+        /** Used when the player cannot report its own length. */
+        private const val FALLBACK_LOOP_MS = 8_000L
+
+        /**
+         * The siren resumes after this even if the speech engine never reports that it has
+         * finished. A spoken alert must never be the thing that silences the alarm.
+         */
+        private const val SPEECH_MAX_MS = 12_000L
+
+        private const val UTTERANCE_ID = "siren-alert"
 
         @Volatile
         var soundResId: Int = 0
@@ -79,11 +94,20 @@ class SirenAlarmService : Service() {
 
     private var wentForeground = false
 
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var pendingSpeech: String? = null
+
+    /** True while the siren is paused for the spoken alert; the watchdog must not restart it. */
+    private var speaking = false
+    private var speechRunnable: Runnable? = null
+    private val resumeAfterSpeech = Runnable { finishSpeech() }
+
     private val watchdog = object : Runnable {
         override fun run() {
             if (!shouldRun) return
             player?.let { p ->
-                if (!p.isPlaying) runCatching { p.start() }
+                if (!speaking && !p.isPlaying) runCatching { p.start() }
             }
             handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
         }
@@ -119,8 +143,12 @@ class SirenAlarmService : Service() {
         val magnitude = intent.getDoubleExtra(EXTRA_MAGNITUDE, 0.0)
         val timeout = intent.getLongExtra(EXTRA_TIMEOUT_MS, 0L)
         val vibrate = intent.getBooleanExtra(EXTRA_VIBRATE, true)
+        val speech = intent.getStringExtra(EXTRA_SPEECH)?.takeIf { it.isNotBlank() }
 
-        if (currentAlertId == alertId && player?.isPlaying == true) return
+        // The push and the Firestore listener both start the alarm for the same alert. The
+        // siren is paused while the alert is spoken, so "not playing" alone would let the
+        // second start cut the speech off and restart everything.
+        if (currentAlertId == alertId && (player?.isPlaying == true || speaking)) return
 
         currentAlertId = alertId
         shouldRun = true
@@ -139,6 +167,8 @@ class SirenAlarmService : Service() {
         }
         requestFocus(intensity)
         raiseAlarmVolume(intensity)
+        cancelSpeech()
+        if (speech != null && intensity != Intensity.GREEN) prepareSpeech(speech)
         startPlayback(intensity)
         if (vibrate) startVibration(intensity)
 
@@ -175,10 +205,113 @@ class SirenAlarmService : Service() {
                     setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                 }
                 isLooping = intensity != Intensity.GREEN
-                setOnPreparedListener { it.start() }
+                setOnPreparedListener {
+                    it.start()
+                    scheduleSpeech(it.duration.toLong())
+                }
                 prepareAsync()
             }
         }.onFailure { Log.e(TAG, "Alarm playback failed", it) }
+    }
+
+    /**
+     * Starts the speech engine as the alarm starts, so it has finished initialising by the
+     * time the first siren cycle ends. Engine start-up takes a second or more on a cold
+     * process, which is exactly the process a push has just woken.
+     */
+    private fun prepareSpeech(text: String) {
+        pendingSpeech = text
+        if (tts != null) return
+        tts = runCatching {
+            TextToSpeech(applicationContext) { status ->
+                handler.post {
+                    val engine = tts ?: return@post
+                    if (status != TextToSpeech.SUCCESS) {
+                        Log.w(TAG, "Speech engine unavailable; the alert will not be spoken")
+                        return@post
+                    }
+                    // Philippine English first, then any English, then whatever is installed.
+                    val locale = listOf(Locale("en", "PH"), Locale.US, Locale.ENGLISH)
+                        .firstOrNull { engine.isLanguageAvailable(it) >= TextToSpeech.LANG_AVAILABLE }
+                    locale?.let { engine.setLanguage(it) }
+                    engine.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            // The alarm stream, like the siren: audible through silent and DND.
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) = Unit
+                        override fun onDone(utteranceId: String?) {
+                            handler.post { finishSpeech() }
+                        }
+
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            handler.post { finishSpeech() }
+                        }
+                    })
+                    ttsReady = true
+                }
+            }
+        }.onFailure { Log.w(TAG, "Could not create the speech engine", it) }.getOrNull()
+    }
+
+    /**
+     * Speaks once, after the first full cycle of the siren rather than over it. The siren
+     * holds exclusive audio focus on the alarm stream, so talking over it would either be
+     * drowned out or fight it for focus; pausing it for a few seconds does neither.
+     */
+    private fun scheduleSpeech(loopMs: Long) {
+        if (pendingSpeech == null) return
+        speechRunnable?.let(handler::removeCallbacks)
+        val delay = if (loopMs > 0) loopMs else FALLBACK_LOOP_MS
+        speechRunnable = Runnable { speakNow() }.also { handler.postDelayed(it, delay) }
+    }
+
+    private fun speakNow() {
+        val text = pendingSpeech ?: return
+        val engine = tts
+        if (!shouldRun || engine == null || !ttsReady) {
+            // Not ready by the end of the first cycle: skip rather than hold the siren back.
+            pendingSpeech = null
+            return
+        }
+        pendingSpeech = null
+        speaking = true
+        runCatching { player?.pause() }
+        val queued = runCatching {
+            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID) == TextToSpeech.SUCCESS
+        }.getOrDefault(false)
+        if (!queued) {
+            finishSpeech()
+            return
+        }
+        handler.postDelayed(resumeAfterSpeech, SPEECH_MAX_MS)
+    }
+
+    private fun finishSpeech() {
+        handler.removeCallbacks(resumeAfterSpeech)
+        if (!speaking) return
+        speaking = false
+        if (shouldRun) runCatching { player?.start() }
+    }
+
+    private fun cancelSpeech() {
+        speechRunnable?.let(handler::removeCallbacks)
+        speechRunnable = null
+        handler.removeCallbacks(resumeAfterSpeech)
+        pendingSpeech = null
+        speaking = false
+        runCatching { tts?.stop() }
+    }
+
+    private fun releaseSpeech() {
+        cancelSpeech()
+        runCatching { tts?.shutdown() }
+        tts = null
+        ttsReady = false
     }
 
     private fun requestFocus(intensity: Intensity) {
@@ -396,6 +529,7 @@ class SirenAlarmService : Service() {
         handler.removeCallbacks(watchdog)
         timeoutRunnable?.let(handler::removeCallbacks)
         timeoutRunnable = null
+        releaseSpeech()
 
         runCatching { player?.stop() }
         runCatching { player?.release() }

@@ -38,6 +38,26 @@
          at all; only the guardian SMS does, and it degrades to a reported failure. -->
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
+    <!-- Shares a student's position with their confirmed guardians and adviser, only while
+         an alert is active and only if the student switched it on in Settings; that is also
+         the one place the permission is asked for. Foreground only — there is deliberately
+         no ACCESS_BACKGROUND_LOCATION: continuous or background tracking of minors is out of
+         scope. Coarse alone is enough if the user chooses "approximate". -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Location permissions otherwise imply a required GPS, which would hide the app from
+         devices without one. The feature degrades to "not shared" instead. -->
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+
+    <!-- Android 11+ package visibility: without this TextToSpeech cannot find the speech
+         engine at all, and the spoken alert fails silently. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:name=".SirenApp"
         android:allowBackup="true"

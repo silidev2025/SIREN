@@ -16,6 +16,11 @@ kotlin {
         namespace = "com.siren.mobile.shared"
         compileSdk = 37
         minSdk = 24
+
+        // Runs commonTest on the build machine's JVM — `:shared:testAndroidHostTest`. For
+        // the pure logic only (catalogue parsing and matching, the PEIS table, speech text);
+        // nothing that needs Firebase or a device.
+        withHostTestBuilder {}
     }
 
     listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
@@ -40,6 +45,10 @@ kotlin {
 
             implementation(libs.gitlive.firebase.auth)
             implementation(libs.gitlive.firebase.firestore)
+        }
+
+        commonTest.dependencies {
+            implementation(kotlin("test"))
         }
 
         androidMain.dependencies {

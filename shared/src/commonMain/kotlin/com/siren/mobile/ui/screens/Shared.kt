@@ -6,8 +6,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -56,19 +58,44 @@ fun ScreenHeader(
     }
 }
 
+/**
+ * @param onOpenLocation shown only when the student has shared a location for the current,
+ *   still-open alert; the row then opens it on a map.
+ */
 @Composable
-fun RosterRow(person: LinkedPerson, modifier: Modifier = Modifier) {
+fun RosterRow(
+    person: LinkedPerson,
+    modifier: Modifier = Modifier,
+    onOpenLocation: ((LinkedPerson) -> Unit)? = null,
+) {
     val detail = when (person.status) {
         ResponseStatus.SAFE -> person.respondedAt?.let { "Confirmed ${DateFmt.clock(it)}" } ?: "Confirmed safe"
         ResponseStatus.NEEDS_HELP -> person.respondedAt?.let { "Asked for help ${DateFmt.clock(it)}" } ?: "Asked for help"
         ResponseStatus.NO_RESPONSE -> person.klass.ifBlank { "Waiting for a response" }
     }
+    val location = person.location?.takeIf { onOpenLocation != null }
     ListRow(
         modifier = modifier,
         title = person.name.ifBlank { "Student" },
-        subtitle = detail,
+        subtitle = location?.let { "$detail · Location shared ${DateFmt.clock(it.locatedAt)}" } ?: detail,
         leading = { Avatar(person.initials, size = 40.dp, photo = person.photo) },
-        trailing = { StatusChip(person.status) },
+        trailing = {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Space.xs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (location != null) {
+                    Icon(
+                        Icons.Filled.LocationOn,
+                        contentDescription = "Location shared",
+                        Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                StatusChip(person.status)
+            }
+        },
+        onClick = if (location != null) ({ onOpenLocation?.invoke(person) }) else null,
     )
 }
 

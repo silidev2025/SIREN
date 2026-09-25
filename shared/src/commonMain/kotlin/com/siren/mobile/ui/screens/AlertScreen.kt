@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sos
 import androidx.compose.material.icons.filled.TaskAlt
@@ -44,6 +45,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material3.TextButton
 import com.siren.mobile.model.AlertRecord
 import com.siren.mobile.model.AlertSource
+import com.siren.mobile.model.FeedCheck
 import com.siren.mobile.model.ResponseStatus
 import com.siren.mobile.model.SafetyResponse
 import com.siren.mobile.platform.Platform
@@ -53,6 +55,7 @@ import com.siren.mobile.ui.components.Haptics
 import com.siren.mobile.ui.components.PrimaryButton
 import com.siren.mobile.ui.components.intensityBrush
 import com.siren.mobile.ui.components.intensityColor
+import com.siren.mobile.ui.components.magnitudeText
 import com.siren.mobile.util.DateFmt
 import com.siren.mobile.util.asGSpaced
 import com.siren.mobile.util.tabular
@@ -75,6 +78,14 @@ fun AlertScreen(
     onRespond: (ResponseStatus) -> Unit,
     onConfirmStatus: () -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * True while this phone's location is shared for this alert. The indicator is not
+     * optional: this tracks minors, and a student must always be able to see that it is
+     * happening and stop it.
+     */
+    sharingLocation: Boolean = false,
+    onStopSharingLocation: () -> Unit = {},
+    feedCheck: FeedCheck? = null,
 ) {
     val transition = rememberInfiniteTransition(label = "alert")
     val pulse by transition.animateFloat(
@@ -187,6 +198,21 @@ fun AlertScreen(
                         style = MaterialTheme.typography.labelMedium.tabular(),
                         modifier = Modifier.padding(top = Space.xxs),
                     )
+
+                    // Only once an official catalogue has the event — usually minutes after
+                    // the alarm, so mostly seen when the alert is reopened. Each figure says
+                    // where it came from; the sensor never supplies a magnitude.
+                    if (feedCheck is FeedCheck.Confirmed) {
+                        Text(
+                            "${feedCheck.quake.magnitudeText()} (${feedCheck.quake.catalog.label}) · " +
+                                "${alert.peisText} (SIREN sensor)",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelLarge.tabular(),
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(top = Space.s),
+                        )
+                    }
                 }
 
                 Row(
@@ -215,6 +241,29 @@ fun AlertScreen(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
+        }
+
+        if (sharingLocation) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(Layout.field))
+                    .background(Color.White.copy(alpha = 0.16f))
+                    .padding(start = Space.m, end = Space.xs),
+                horizontalArrangement = Arrangement.spacedBy(Space.s),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.LocationOn, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                Text(
+                    "Your location is shared with your guardians and adviser for this alert",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onStopSharingLocation) {
+                    Text("Stop", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
         }
 
         if (!canRespond) {

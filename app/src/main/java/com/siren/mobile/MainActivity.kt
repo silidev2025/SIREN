@@ -17,6 +17,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
 import com.siren.mobile.data.SirenRepository
 import com.siren.mobile.platform.AndroidPlatformServices
+import com.siren.mobile.platform.LocationPermissionRequester
 import com.siren.mobile.platform.ProfilePhotoEncoder
 import com.siren.mobile.platform.ProfilePhotoPicker
 import com.siren.mobile.platform.SmsPermissionRequester
@@ -28,7 +29,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
-class MainActivity : ComponentActivity(), ProfilePhotoPicker, SmsPermissionRequester {
+class MainActivity :
+    ComponentActivity(),
+    ProfilePhotoPicker,
+    SmsPermissionRequester,
+    LocationPermissionRequester {
 
     companion object {
         const val EXTRA_ALERT_ID = AndroidPlatformServices.EXTRA_ALERT_ID
@@ -47,6 +52,18 @@ class MainActivity : ComponentActivity(), ProfilePhotoPicker, SmsPermissionReque
             val waiting = pendingSmsPermission
             pendingSmsPermission = null
             if (waiting != null && waiting.isActive) waiting.resume(granted)
+        }
+
+    private var pendingLocationPermission: CancellableContinuation<Boolean>? = null
+
+    // Asked only when a student switches on "Share my location during alerts" in Settings,
+    // never at launch and never during an alert. Either grant is enough: Android 12+ lets
+    // the user pick "approximate", and that is still worth sending to a guardian.
+    private val locationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            val waiting = pendingLocationPermission
+            pendingLocationPermission = null
+            if (waiting != null && waiting.isActive) waiting.resume(result.values.any { it })
         }
 
     private var pendingPhoto: CancellableContinuation<String?>? = null
@@ -80,6 +97,23 @@ class MainActivity : ComponentActivity(), ProfilePhotoPicker, SmsPermissionReque
                     pendingSmsPermission = null
                     if (cont.isActive) cont.resume(false)
                 }
+        }
+    }
+
+    override suspend fun requestLocationPermission(): Boolean = suspendCancellableCoroutine { cont ->
+        pendingLocationPermission?.takeIf { it.isActive }?.resume(false)
+        pendingLocationPermission = cont
+        cont.invokeOnCancellation { pendingLocationPermission = null }
+        runCatching {
+            locationPermission.launch(
+                arrayOf(
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                )
+            )
+        }.onFailure {
+            pendingLocationPermission = null
+            if (cont.isActive) cont.resume(false)
         }
     }
 

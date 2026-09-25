@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.FamilyRestroom
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
@@ -60,6 +61,8 @@ fun ParentDashboardScreen(
     onOpenGuide: () -> Unit,
     onOpenDemo: () -> Unit,
     onCall: (String) -> Unit,
+    onOpenLocation: (LinkedPerson) -> Unit = {},
+    onOpenOfficialQuakes: () -> Unit = {},
 ) {
     val status = SirenTheme.status
     val needsHelp = children.count { it.status == ResponseStatus.NEEDS_HELP }
@@ -174,7 +177,7 @@ fun ParentDashboardScreen(
             else -> item {
                 ListGroup {
                     children.forEachIndexed { i, child ->
-                        RosterRow(child)
+                        RosterRow(child, onOpenLocation = onOpenLocation)
                         if (i < children.lastIndex) RowDivider()
                     }
                 }
@@ -196,6 +199,14 @@ fun ParentDashboardScreen(
                     title = "Safety guide",
                     subtitle = "Drop, cover, hold and 27 more",
                     onClick = onOpenGuide,
+                )
+                RowDivider()
+
+                TileRow(
+                    icon = Icons.Filled.Public,
+                    title = "Recent earthquakes",
+                    subtitle = "Official catalogue data · EMSC / USGS",
+                    onClick = onOpenOfficialQuakes,
                 )
                 RowDivider()
 

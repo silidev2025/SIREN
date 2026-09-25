@@ -9,7 +9,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContactSupport
@@ -30,11 +32,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.siren.mobile.model.AlertRecord
+import com.siren.mobile.model.FeedCheck
 import com.siren.mobile.model.ResponseStatus
 import com.siren.mobile.model.SafetyResponse
 import com.siren.mobile.ui.components.ButtonTone
 import com.siren.mobile.ui.components.Haptics
 import com.siren.mobile.ui.components.InfoBanner
+import com.siren.mobile.ui.components.OfficialDataCard
 import com.siren.mobile.ui.components.Pill
 import com.siren.mobile.ui.components.PrimaryButton
 import com.siren.mobile.util.DateFmt
@@ -57,6 +61,7 @@ fun SafetyConfirmationScreen(
     onRespond: (ResponseStatus) -> Unit,
     onDone: () -> Unit,
     onBack: () -> Unit,
+    feedCheck: FeedCheck? = null,
 ) {
     val stamp = remember(myResponse?.respondedAt) {
         myResponse?.let { "${DateFmt.date(it.respondedAt)} · ${DateFmt.clockSeconds(it.respondedAt)}" }
@@ -132,7 +137,7 @@ fun SafetyConfirmationScreen(
         } else {
             val safe = myResponse.status == ResponseStatus.SAFE
             Column(
-                Modifier.weight(1f),
+                Modifier.weight(1f).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(Space.m),
             ) {
                 Row(
@@ -194,6 +199,8 @@ fun SafetyConfirmationScreen(
                         tone = ButtonTone.Danger,
                     )
                 }
+
+                OfficialDataCard(alert, feedCheck)
             }
 
             PrimaryButton(text = "Done", onClick = onDone)

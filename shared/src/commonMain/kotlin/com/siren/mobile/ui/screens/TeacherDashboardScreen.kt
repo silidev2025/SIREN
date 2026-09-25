@@ -86,6 +86,7 @@ fun TeacherDashboardScreen(
     onAddStudent: (code: String) -> Unit,
     onRemoveStudent: (uid: String) -> Unit,
     onEditProfile: () -> Unit,
+    onOpenLocation: (LinkedPerson) -> Unit = {},
 ) {
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf(RosterFilter.ALL) }
@@ -275,7 +276,7 @@ fun TeacherDashboardScreen(
             else -> item {
                 ListGroup {
                     visible.forEachIndexed { i, person ->
-                        RosterRow(person)
+                        RosterRow(person, onOpenLocation = onOpenLocation)
                         Box(Modifier.padding(start = Space.l, bottom = Space.xs)) {
                             TextButton(onClick = { removing = person }) { Text("Remove from class") }
                         }
