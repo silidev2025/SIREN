@@ -9,6 +9,7 @@ captures/
 
 # Signing material — never commit these.
 keystore.properties
+env.local
 *.jks
 *.keystore
 

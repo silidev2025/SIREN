@@ -21,13 +21,15 @@ Three files are gitignored on purpose and have to be restored first:
 | File | Needed for | If missing |
 |---|---|---|
 | `app/google-services.json` | any build | the `google-services` plugin fails the build outright |
-| `keystore.properties` | release | build succeeds, APK comes out **unsigned** |
+| `env.local` (template: `env.local.example`) | release | build succeeds, APK comes out **unsigned** |
 | `siren-release.jks` | release | as above |
 
 `google-services.json` comes from the Firebase console for the
-`com.research.siren` Android app. The original `siren-release.jks` was lost with
-the old project folder; the current key was generated on 5 Aug 2026 by
-`tools/make-keystore.ps1` — see `step.txt` section 5.
+`com.research.siren` Android app, or can be rebuilt from any APK here — CLAUDE.md,
+*Secrets*, has both routes. The release key has been lost and regenerated more than
+once and there are currently two candidates; read CLAUDE.md, *The release signing key*,
+before signing anything. (`tools/make-keystore.ps1`, which an earlier version of this file
+named, never existed.)
 
 ## Nothing here has been run
 

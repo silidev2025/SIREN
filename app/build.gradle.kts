@@ -8,9 +8,28 @@ plugins {
     alias(libs.plugins.google.services)
 }
 
-val keystorePropsFile = rootProject.file("keystore.properties")
-val keystoreProps = Properties().apply {
-    if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
+// Release signing values (storeFile, storePassword, keyAlias, keyPassword) live in
+// env.local at the repo root — gitignored, template in env.local.example. The older
+// keystore.properties is still read as a fallback so a machine that has not moved over
+// keeps signing. Neither file is ever committed.
+val signingPropsFile = listOf("env.local", "keystore.properties")
+    .map { rootProject.file(it) }
+    .firstOrNull { it.exists() }
+val signingProps = Properties().apply {
+    signingPropsFile?.inputStream()?.use { load(it) }
+}
+val releaseStoreFile = signingProps.getProperty("storeFile")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { rootProject.file(it) }
+val canSignRelease = releaseStoreFile?.exists() == true
+
+// A release build without a signing config comes out unsigned without complaining, so say
+// so up front rather than leaving it to be discovered when the APK refuses to install.
+if (signingPropsFile != null && !canSignRelease) {
+    logger.warn(
+        "SIREN: ${signingPropsFile.name} is present but its storeFile " +
+            "(${signingProps.getProperty("storeFile")}) was not found — release builds will be unsigned."
+    )
 }
 
 android {
@@ -27,12 +46,12 @@ android {
     }
 
     signingConfigs {
-        if (keystorePropsFile.exists()) {
+        if (canSignRelease) {
             create("release") {
-                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
-                storePassword = keystoreProps.getProperty("storePassword")
-                keyAlias = keystoreProps.getProperty("keyAlias")
-                keyPassword = keystoreProps.getProperty("keyPassword")
+                storeFile = releaseStoreFile
+                storePassword = signingProps.getProperty("storePassword")
+                keyAlias = signingProps.getProperty("keyAlias")
+                keyPassword = signingProps.getProperty("keyPassword")
             }
         }
     }
@@ -47,7 +66,7 @@ android {
 
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            if (keystorePropsFile.exists()) {
+            if (canSignRelease) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
