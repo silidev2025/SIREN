@@ -4,7 +4,7 @@ Unminified, debuggable builds. Use these while testing on a phone — the
 stack traces are readable and `adb logcat` is useful.
 
 ```powershell
-$env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot"
+$env:JAVA_HOME="<any JDK 17>"          # e.g. C:\Users\<you>\.jdks\jdk-17.0.20.1+1
 $env:ANDROID_HOME="$env:LOCALAPPDATA\Android\Sdk"
 $env:Path="$env:JAVA_HOME\bin;$env:Path"
 
@@ -16,9 +16,55 @@ named `SIREN-v<version>-debug.apk`.
 
 | File | Version | Size | Built |
 |---|---|---|---|
-| `SIREN-v3.0.0-debug.apk` | 3.0.0 (versionCode 10) | 25.7 MB | 23 Sep 2026 |
+| `SIREN-v3.1.0-debug.apk` | 3.1.0 (versionCode 11) | 25.9 MB | 25 Sep 2026 |
 
-**3.0.0 carries the app half of background push** (Next phase 0). The fix itself is a
+**3.1.0 is the second-phase features, Next phase 1–4** — details in CLAUDE.md:
+
+- **Location during alerts** — opt-in (Settings → *Share my location during alerts*,
+  students only), taken only while an alert is on screen, visible to confirmed guardians
+  and the adviser on an OpenStreetMap view, with a "shared" strip and **Stop** on the alert
+- **Official earthquake data** — *Recent earthquakes* from EMSC (USGS fallback), and each
+  sensor alert cross-checked against them: CONFIRMED with the catalogue's magnitude, or
+  UNCONFIRMED after 30 minutes. Never labelled PHIVOLCS
+- **Magnitude and intensity together** — "Magnitude 4.4 (EMSC) · Intensity V (SIREN
+  sensor)"; magnitude only ever from a catalogue
+- **Spoken alert** — "Earthquake. Intensity seven. Drop, cover, and hold on." once, after
+  the first siren cycle, with the siren paused underneath; drills say they are drills
+
+**Signed with yet another debug key** — this was built on a third machine:
+
+```
+26:3E:A4:83:BE:45:EA:89:80:99:7B:35:C5:14:A4:CE:DE:C9:1C:CC:1F:0C:2A:44:71:4A:A9:A4:A0:B1:54:AC
+```
+
+It is **not registered in Firebase yet**, so phone sign-up on this build fails with "This
+app is not authorized" until it is added (Project settings → Android app → SHA
+fingerprints). Email sign-in, alerts, Firestore, the feeds and the alarm are unaffected.
+It will also **not install over 3.0.0** — uninstall first.
+
+`app/google-services.json` for this build was rebuilt from the 3.0.0 APK's own resources
+(CLAUDE.md, *Secrets*); the Firebase values in the two APKs were compared and are
+byte-identical.
+
+Verified in the artifact, 25 Sep 2026:
+
+- `versionCode 11`, `versionName 3.1.0`, label `SIREN`
+- 28 `ic_sg_*` pictograms and 5 Inter weights under `assets/composeResources/`
+- `res/raw/siren_alarm.mp3` at 139,695 bytes
+- `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION` in the merged manifest, and **no**
+  `ACCESS_BACKGROUND_LOCATION`; `android.hardware.location(.gps)` marked not required
+- the `<queries>` entry for `android.intent.action.TTS_SERVICE`, without which the spoken
+  alert fails silently on Android 11+
+- the four earlier permissions still present (`USE_FULL_SCREEN_INTENT`,
+  `SYSTEM_ALERT_WINDOW`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `SEND_SMS`)
+- `:shared:testAndroidHostTest` — 15 tests covering the catalogue parser against real
+  EMSC and USGS responses, the confirm/unconfirm matching, the PGA → PEIS table and the
+  spoken text — all pass
+
+**Not run on a phone.** None of the four features has been exercised on a device; walk
+steps 14–17 below before relying on any of them.
+
+**3.0.0 carried the app half of background push** (Next phase 0). The fix itself is a
 Cloud Function in `functions/` that fans a new `alerts` document out to the FCM `alerts`
 topic; until it is deployed, an app that has been swiped away receives nothing at all.
 
@@ -183,3 +229,17 @@ uninstall before switching between them.
 11. Respond on one account and verify it appears on a teacher or parent account
 12. Airplane mode → respond → reconnect → confirm the response syncs
 13. Open the Safety Guide — it is the canary for Compose-resource packaging
+14. **Spoken alert (3.1.0).** Phone on silent, trigger Yellow then Red from Demo Mode. One
+    full siren cycle, then the siren pauses, "This is a drill, not a real earthquake…"
+    is heard, and the siren comes back. Turn Settings → Spoken alert off: siren only
+15. **Location (3.1.0).** Three accounts: student, confirmed guardian, adviser. Turn on
+    sharing in the student's Settings — the permission prompt must appear there, and only
+    there. Trigger Red: the alert shows "Your location is shared…"; guardian and adviser
+    rows show a pin that opens the map. **Stop** removes the pin; closing the event
+    removes it for everyone. Revoke the permission in Android settings — the switch must
+    then read off
+16. **Official data (3.1.0).** History → Recent earthquakes lists EMSC (or USGS), never
+    PHIVOLCS. A Demo alert's roll call shows DRILL; a real sensor alert shows CHECKING,
+    then CONFIRMED or UNCONFIRMED within about half an hour
+17. **Airplane mode, then open Recent earthquakes** — it must say it couldn't reach EMSC or
+    USGS, and SIREN's own alerts must be unaffected

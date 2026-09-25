@@ -29,11 +29,11 @@ git's rename detection carries them across on the pull.
 
 | Module | Status |
 |---|---|
-| `:shared` | ✅ Compose Multiplatform library. All UI, models and the data layer. `compileCommonMainKotlinMetadata` and `compileAndroidMain` both pass. |
+| `:shared` | ✅ Compose Multiplatform library. All UI, models and the data layer. `compileCommonMainKotlinMetadata` and `compileAndroidMain` both pass; `testAndroidHostTest` runs 15 tests over the catalogue parser, alert matching, PEIS table and spoken text. |
 | `:app` | ⚠️ Thin Android host (3 files). Builds only where `app/google-services.json` has been restored — see **Secrets**. |
 | `iosApp/` | ⚠️ Swift sources + Podfile written, **never compiled**. Needs a Mac — see below. |
 | `firmware/` | ✅ **v3.0-mpu6050**, committed 23 Sep 2026, matching the board. The v2.0 ADXL335 sketch — and the optional SIM800L GSM-SMS fallback that only it carried — stay in history at `fcff24a`. See **Firmware**. |
-| Shipped APK | `dist/` holds **v2.9.2** debug and release. The next build is **v3.0.0** — see **Shipping an APK**. |
+| Shipped APK | `dist/debug/` holds **v3.1.0** (Next phase 0–4); `dist/release/` still holds **v2.9.2**, because the machine that built 3.1.0 has no release key and which key to use is still open — see **Shipping an APK** and **The release signing key**. |
 
 ```powershell
 $env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot"   # per-machine
@@ -45,11 +45,13 @@ cd <repo root>          # wherever this clone lives
 .\gradlew.bat :app:assembleRelease                  # signed release APK
 .\gradlew.bat :shared:compileCommonMainKotlinMetadata   # type-checks common code for BOTH platforms
 .\gradlew.bat :shared:compileAndroidMain               # type-checks shared/src/androidMain
+.\gradlew.bat :shared:testAndroidHostTest              # commonTest on the JVM (no device, no Firebase)
 ```
 
 **The `JAVA_HOME` path above is that machine's, not a requirement.** Any JDK 17 works —
 the 23 Sep 2026 debug build was made with Azul Zulu 17.0.18 at
-`C:\Program Files\Zulu\zulu-17`. Check what a machine actually has with
+`C:\Program Files\Zulu\zulu-17`, and the 25 Sep one with a portable Temurin 17.0.20.1 zip
+unpacked to `~\.jdks\` (no installer, no admin rights needed). Check what a machine actually has with
 `(Get-Command java).Source` before assuming the toolchain is missing. `compileSdk 37`
 resolved without a manual `sdkmanager` step on a machine whose newest installed
 platform was `android-36.1` and which had no `cmdline-tools` at all, so try the build
@@ -63,9 +65,9 @@ credentials at all. `:app` cannot: `processDebugGoogleServices` runs ahead of ev
 compile task, so even `:app:compileDebugKotlin` fails with "File google-services.json
 is missing" before a single line is compiled.
 
-### Setting up the SDK from scratch — two traps
+### Setting up the SDK from scratch — four traps
 
-Both cost a cycle:
+Each cost a cycle:
 
 - **The command-line tools at the well-known `commandlinetools-win-*_latest.zip` URL
   are revision 12.0 and cannot resolve API 37 packages at all.** `sdkmanager --list`
@@ -76,6 +78,15 @@ Both cost a cycle:
 - **API 37 has minor versions.** The package is `platforms;android-37.0` — plain
   `platforms;android-37` does not exist. `37.1` and `37.2-beta` are also published.
   `build-tools;37.0.0` keeps the old three-part form.
+- **Command-line tools 23.0 renamed every package path from `;` to `/`.** On 25 Sep 2026
+  `cmdline-tools;latest` installed revision 23.0 (in `cmdline-tools/latest`, not
+  `latest-2`), which lists `platforms/android-37.0` and `build-tools/37.0.0`. Asking it
+  for the old `;` names fails with `Package 36.0.0 not found` and silently skips the rest
+  of the batch — it installed `platform-tools` and nothing else. Use the `/` form:
+  `sdkmanager "platforms/android-37.0" "build-tools/37.0.0" "build-tools/36.0.0"`.
+- **Piping `y` into `sdkmanager.bat --licenses` from PowerShell does not answer the
+  prompts.** It reports "7 of 7 SDK package licenses not accepted" and every install
+  after it is refused. From Git Bash, `yes | sdkmanager.bat --licenses` works.
 
 Gradle will also pull `build-tools;36.0.0` in on its own; that is expected, not a
 misconfiguration.
@@ -87,13 +98,14 @@ misconfiguration.
 ```
 shared/src/commonMain/     everything cross-platform
   ui/App.kt                auth gate + back stack + role-based bottom nav
-  ui/screens/              16 screens
+  ui/screens/              20 screens
   ui/theme/                colours, Inter typography, spacing
-  ui/components/           shared widgets, Haptics facade
-  data/SirenRepository     auth, Firestore, settings  (GitLive Firebase KMP)
-  model/Models.kt          enums + data classes
+  ui/components/           shared widgets, Haptics facade, OsmStaticMap, OfficialDataCard
+  data/SirenRepository     auth, Firestore, settings, shared locations  (GitLive Firebase KMP)
+  data/QuakeFeed           EMSC / USGS catalogue client + alert cross-referencing
+  model/Models.kt          enums + data classes, PGA → PEIS numeral
   platform/Platform.kt     PlatformServices interface + installer
-  util/                    DateFmt (expect), Format helpers
+  util/                    DateFmt (expect), Format, Geo, IsoTime, VoiceAlert
   composeResources/        28 ic_sg_* pictograms, 5 Inter weights, vectors
 
 shared/src/androidMain/    AndroidPlatformServices, DateFmt actual, BackHandler actual
@@ -104,8 +116,14 @@ iosApp/                    Swift host (unbuilt)
 
 Platform differences go through **`PlatformServices`** (an interface, installed at
 start-up), not expect/actual — vibration, notifications, dial/SMS, settings storage,
-FCM topic, wall-clock. Only `DateFmt` and `PlatformBackHandler` use expect/actual,
+FCM topic, wall-clock, HTTP, location, open-in-maps, and the spoken alert (a `speech`
+argument on `startAlarm`). Only `DateFmt` and `PlatformBackHandler` use expect/actual,
 because they need per-platform *compile-time* bindings.
+
+HTTP is `PlatformServices.httpGet` rather than a Ktor dependency: two callers (the
+catalogue feeds and map tiles), both simple GETs, and one less library to verify on iOS.
+It sends a User-Agent naming SIREN, which the OpenStreetMap tile servers **require** — the
+default Dalvik one gets tiles refused.
 
 `App()` is the single entry point: `MainActivity.setContent { App() }` on Android,
 `MainViewController()` on iOS.
@@ -205,6 +223,9 @@ Each of these cost a debugging cycle:
   The alarm service uses its own **silent** channel (`siren_alarm_playback`) precisely
   so the notification does not play a second sound over MediaPlayer.
 - **Android Studio's bundled JBR 25 is too new.** Always build with JDK 17.
+- **`TextToSpeech` needs a `<queries>` entry for `android.intent.action.TTS_SERVICE`**
+  on targetSdk 30+. Without it the engine is invisible to the app and the spoken alert
+  fails with no error — `onInit` just reports failure.
 - **GitLive's `DocumentReference.update(vararg Pair)` is deprecated** in favour of
   `updateFields`. Every call site still compiles and warns; migrate them together
   rather than piecemeal, so the diff is one reviewable change rather than noise
@@ -356,10 +377,13 @@ specific, actionable error and nothing more. See **Authentication → Phone sign
 
 ### 5. Optional cleanups
 
-- `app/src/main/res/drawable/ic_phone_outline.xml` and `ic_brand_tile.xml` may now be
-  unused — check before deleting
-- `Platform.services.clearNotifications()` and `vibrateTap()` are implemented but not
-  called anywhere yet
+- ~~`app/src/main/res/drawable/ic_phone_outline.xml` and `ic_brand_tile.xml`~~ —
+  confirmed unreferenced (no Kotlin, XML or manifest reference) and deleted in v3.1.0.
+  The separate `composeResources/drawable/ic_brand_tile.xml` is also unreferenced; left in
+  place, since nothing about it was ever checked
+- `clearNotifications()` **is** called — by `consumeIncomingAlert` when an alert is
+  dismissed. `vibrateTap()` is reachable only through `Haptics.tap()`, which nothing calls;
+  wire it to a button or drop both
 - `Yellow` still steps down after 30 s by design, while Red loops until dismissed. If
   the intent is for *every* level to ring until acknowledged, that is a one-line change
   in `AndroidPlatformServices.startAlarm` (`EXTRA_TIMEOUT_MS`)
@@ -368,93 +392,137 @@ specific, actionable error and nothing more. See **Authentication → Phone sign
 
 ## Next phase (post-competition)
 
-Five features, in the order that makes sense to build them. Nothing here is started.
+Items 0–4 are **built** as of v3.1.0 (25 Sep 2026); 5 is still future. Everything below
+compiles and packages; **none of it has been run on a phone yet** — see *Testing
+priorities*. What each one still needs outside the code is called out under it.
 
 **Before adding any field to an `alerts` document**, read the warning at the end of
 **Data model** — a field the app cannot decode silently removes the alert from the
-list, which looks exactly like the hardware failing.
+list, which looks exactly like the hardware failing. Nothing in 1–4 touches the alert
+document itself; both new records live in subcollections for exactly that reason.
 
-### 0. Background push is still missing (do this first)
+### 0. Background push ✅ (code) — deploy it
 
-Nothing publishes to the FCM `alerts` topic when a document is created. The app only
-sees an alert through its Firestore listener, which needs the app to be running. **On
-a phone where the app has been swiped away, no alert arrives at all**, and that is by
-far the biggest hole in the system.
+`functions/index.js` fans every new `alerts` document out to the FCM `alerts` topic as a
+data-only, high-priority message carrying `alertId`, `intensity`, `magnitudeG`, `nodeId`
+and `source` — the keys `SirenMessagingService` reads. It needs the Blaze plan (the
+project is on it) and has to be **deployed**: `firebase deploy --only functions` from the
+repo root. Until it is, a phone with the app swiped away receives nothing at all. Say so in
+the paper as a limitation if it ever cannot be deployed.
 
-The fix is a ~30-line Cloud Function on `onDocumentCreated("alerts/{alertId}")` that
-sends a data-only, high-priority message to the topic with `alertId`, `intensity`,
-`magnitudeG` and `nodeId` — the exact keys `SirenMessagingService` already reads, so
-no app change is needed. It requires the **Blaze plan**, which needs a billing card
-even though this usage stays inside the free tier. If billing is impossible, say so in
-the paper as a limitation rather than pretending the app alerts when closed.
+### 1. GPS location during alerts ✅
 
-### 1. GPS location tracking
+Where a student is during an earthquake, on a map, for their confirmed guardians and
+their adviser. The phone's own location — no hardware change. The limits were designed in,
+because this tracks minors:
 
-Where a student is during an earthquake, on a map, for their linked guardians and
-teachers.
+- **Opt-in, off by default.** Settings → *Share my location during alerts*, students only.
+  The location permission is asked for right there, never at launch and never during an
+  alert (`setShareLocation` → `ensureLocationPermission`, the SMS permission's pattern).
+  The switch reads as on only if the permission is *still* granted, so revoking it in
+  Android settings cannot leave a switch that lies.
+- **Only while an alert is active, only while the app is visible.** A fix is taken when the
+  alert comes up on screen and again when the student answers (`shareLocationFor`). No
+  `ACCESS_BACKGROUND_LOCATION`: answering from the lock-screen notification with the app
+  closed shares nothing, and continuous or background tracking stays out of scope.
+- **Visible indicator with an off switch.** The alert screen shows "Your location is shared
+  with your guardians and adviser" with **Stop**, which deletes the document and never
+  re-shares for that alert (`stopSharingLocation`).
+- **Scoped to the event.** Written to `alerts/{alertId}/locations/{userId}`. When the event
+  is closed, the student's own client deletes it and viewers stop listening;
+  `expiresAt` (+24 h) is there for a Firestore **TTL policy**, which has to be switched on
+  once in the console (collection group `locations`, field `expiresAt`) as the backstop.
+- **Viewers.** An adviser queries their own class (`where classId ==`); a guardian reads one
+  document per confirmed child. Roster rows show a pin and open *Student location* — a
+  static OpenStreetMap view (`OsmStaticMap`, tiles drawn on a canvas, no API key, no map
+  library) with the accuracy radius and **Open in Maps**.
+- **Not enforced server-side yet.** The queries above are shaped so that rules *can*
+  enforce the same limits, but under the current permissive rules any signed-in user could
+  read any location. Merge this into the deployed rules:
 
-- Use the **phone's** GPS. No hardware change.
-- This tracks minors, so design the limits in from the start: explicit opt-in,
-  location shared **only while an alert is active**, visible only to already-linked
-  guardians and the student's own adviser, and a visible indicator while sharing.
-  Continuous background tracking is out of scope and should stay out.
-- Google Maps needs an API key with billing attached. **OpenStreetMap via a tile
-  library avoids that** and is the better default for a school project.
-- Goes through `PlatformServices` like every other platform capability, not
-  expect/actual.
-- Firestore: add to the response document rather than the alert, e.g.
-  `alerts/{alertId}/responses/{userId}` gaining `lat`, `lng`, `accuracyM`,
-  `locatedAt`. That keeps it scoped to one event and expires naturally.
+  ```
+  match /alerts/{alertId}/locations/{studentId} {
+    allow create, update, delete: if request.auth != null && request.auth.uid == studentId;
+    allow read: if request.auth != null && (
+      request.auth.uid == studentId
+      // the student's adviser: a teacher whose classId matches the one stored on the location
+      || (resource.data.classId != ''
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'teacher'
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.classId == resource.data.classId)
+      // a guardian the student approved — checked against the link the STUDENT confirmed,
+      // not the parent's own linkedStudentIds, which the parent's client writes itself
+      || get(/databases/$(database)/documents/linkRequests/$(studentId + '_' + request.auth.uid)).data.status == 'approved'
+    );
+  }
+  ```
+- **iOS reports `locationSupported = false`**, which hides the setting: `CLLocationManager`
+  needs a delegate object and an `Info.plist` usage string, neither verifiable off a Mac.
 
-### 2. Official earthquake data in the app
+### 2. Official earthquake data ✅
 
-**PHIVOLCS has no public API.** Their bulletin page can be scraped, but it breaks
-easily and has had certificate problems, and scraping needs a server. Use the standard
-seismological feeds instead:
+**PHIVOLCS has no public API**, so `QuakeFeed` reads the standard FDSN event services:
+**EMSC** (`seismicportal.eu`) first, **USGS** as the fallback — no keys. *Recent
+earthquakes* (from History, and the parent dashboard) lists M3+ in the Philippine box
+(lat 4–21, lon 116–127) over the past week, with the catalogue, magnitude type and
+contributing agency on every row. EMSC often relays PHIVOLCS's own solution, which shows
+as "agency PHIV"; the screen still never calls the data PHIVOLCS's, and its banner carries
+the honest limits: global networks, minutes behind, can miss small local events, may differ
+from PHIVOLCS by a tenth or two, revised after publication. A **confirmation** source,
+never the warning.
 
-- **EMSC** primary: `https://www.seismicportal.eu/fdsnws/event/1/query` (FDSN, JSON,
-  no key). Better regional pickup.
-- **USGS** fallback: `https://earthquake.usgs.gov/fdsnws/event/1/query` and the
-  GeoJSON summary feeds. No key, CDN-cached, updated about every minute.
-- Filter to the Philippines with a bounding box, roughly lat 4 to 21, lon 116 to 127.
+**Cross-referencing** (`QuakeFeed.verify`) is the research angle: for each sensor alert it
+asks both catalogues for events within ~830 km of the node from 10 minutes before to 2
+minutes after detection, then keeps an event only if
 
-Honest limits to carry into the UI and the paper: these are global networks, so small
-local events PHIVOLCS reports may be missing; magnitudes can differ from PHIVOLCS by a
-tenth or two because different agencies use different stations and scales; values are
-revised after first publication; and the feed is minutes behind, so it is a
-**confirmation** source, not the warning. **Label the source in the UI.** Do not call
-it PHIVOLCS data.
+- it is within a **magnitude-dependent felt radius** (`feltRadiusKm`: M<3 50 km, <4 120 km,
+  <5 250 km, <6 450 km, else 800 km) — a deliberately generous *matching heuristic*, not an
+  attenuation model, there so a small event across the archipelago cannot "confirm" a desk
+  knock in Bogo. **State it in the methodology, and tune it there, not here**; and
+- the detection falls between 2 minutes before and 3 minutes after the predicted shaking
+  arrival, origin time + distance ÷ 3.5 km/s (shear waves).
 
-The strong research angle here is cross-referencing: when the node fires, query the
-feed for a nearby event in the same window and mark the alert confirmed or
-unconfirmed. That gives the evaluation an independent ground truth, which is the first
-thing a panel asks about.
+The closest fit in time wins. Until 30 minutes have passed "no match" only means "not
+yet" (re-checked every 3 minutes); after that it is **UNCONFIRMED**. Demo alerts are never
+checked. The final verdict is written to `alerts/{alertId}/verification/feed` — the
+independent ground truth for the evaluation, with the node's own PEIS estimate stored
+beside the catalogue's magnitude. History checks only the 10 most recent sensor alerts per
+visit: each check is two requests to free public services.
 
-### 3. Magnitude and intensity together
+`SensorNodes.BOGO` is Bogo City's centre, good to a few kilometres — far finer than the
+match radius. Give each node its own entry if more are deployed.
 
-Display "Magnitude 4.4 | Intensity III".
+### 3. Magnitude and intensity together ✅
 
-**The device cannot measure magnitude.** Magnitude is energy at the source and takes
-several stations to compute. The node measures shaking where it sits, which is
-intensity. So: **magnitude from the feed, intensity from the device**, each labelled
-with where it came from. Anything else is a claim the hardware cannot support, and it
-is the easiest thing for a panel to pull apart.
+"Magnitude 4.4 (EMSC) · Intensity V (SIREN sensor)" — `OfficialDataCard` on the live roll
+call and the safety-check details, a one-line version on the alert screen once confirmed,
+and a catalogue tag on history rows. **Magnitude only ever comes from a catalogue**; until
+one has the event the slot reads "Magnitude —". The node measures intensity, never
+magnitude, and the UI never implies otherwise.
 
-Mapping PGA to a PEIS roman numeral belongs in `Intensity` in `Models.kt` so the app
-and the firmware keep one source of truth. Note that USGS's `mmi` field is Modified
-Mercalli, not PEIS, and is often empty for smaller events.
+The PGA → PEIS numeral is `Intensity.peisFromPga` in `Models.kt` — see *Intensity
+thresholds*. USGS's `mmi` field is Modified Mercalli, not PEIS, and is not used.
 
-### 4. In-app voice alert
+### 4. In-app voice alert ✅
 
-The app speaks the alert aloud, for example "Intensity seven. Take cover."
+"Earthquake. Intensity seven. Drop, cover, and hold on." — composed once in common code
+(`VoiceAlert.phrase`) and passed to `startAlarm` as `speech`. Drills are prefixed "This is
+a drill, not a real earthquake." Green is never spoken. Settings → *Spoken alert*, on by
+default.
 
-- Android `TextToSpeech`, iOS `AVSpeechSynthesizer`, both behind `PlatformServices`.
-- Filipino voices exist on most Android phones. **Cebuano generally does not**, so if
-  the alert should be in Bisaya, use short pre-recorded clips instead of TTS.
-- The alarm already owns audio. `SirenAlarmService` holds a `MediaPlayer` with
-  `USAGE_ALARM` and an exclusive audio-focus request, so speech has to be sequenced
-  against it or it will either be inaudible or steal focus from the siren. Speak once
-  after the first alarm loop rather than over it.
+- **Sequenced against the siren, not over it.** `SirenAlarmService` starts the speech
+  engine with the alarm (so it has initialised by the time it is needed), and when the
+  first full loop of the siren ends it **pauses** the player, speaks on the **alarm stream**
+  (`USAGE_ALARM`, so it is heard through silent and DND like the siren), and resumes on
+  `onDone`. A 12 s backstop resumes the siren if the engine never reports back, and the
+  watchdog is told not to restart the player mid-sentence. If the engine is not ready by
+  the end of the first loop the speech is skipped rather than holding the siren back.
+- **Android 11+ needs `<queries>` for `TTS_SERVICE`** in the manifest, or `TextToSpeech`
+  cannot find the engine and the spoken alert fails silently. It is there.
+- English only (`en-PH`, then `en-US`). Filipino voices exist on most phones; **Cebuano
+  generally does not**, so a Bisaya alert would be short pre-recorded clips, not TTS.
+- iOS speaks with `AVSpeechSynthesizer` after the first loop with the siren *ducked*
+  rather than paused — without a delegate there is no reliable "finished" callback to
+  resume on. Unverified, like the rest of `iosMain`.
 
 ### 5. Web version (future)
 
@@ -487,6 +555,10 @@ notification actions do.
 | Green — Intensity I–IV | single chime, respects ringer | one pulse | none |
 | Yellow — Intensity V–VI | repeats, stops after 30 s | repeating | foreground |
 | **Red — Intensity VII+** | **loops until dismissed, bypasses silent** | **continuous** | foreground |
+
+Since v3.1.0, Yellow and Red also **speak once** after the first full siren cycle, with
+the siren paused underneath — see *Next phase → 4*. The watchdog below knows about the
+pause; anything else that restarts the player must too.
 
 Android runs it from `SirenAlarmService` (a foreground service) — audio driven from a
 composable dies the moment the app is backgrounded, which is exactly when the alarm
@@ -682,6 +754,7 @@ all three fail at runtime rather than at build time:
    | release (`siren-release.jks`) | `BA:20:E1:93:A4:8A:A7:81:46:76:B9:A6:EB:40:DE:16:F4:47:33:46:1A:A6:96:82:60:09:09:B7:A2:88:50:7D` | 2.9.2 |
    | debug (`~/.android/debug.keystore`, **the machine this file was written on**) | `84:CB:0A:7B:D6:B4:24:22:52:4E:F2:8A:54:79:C6:BF:B0:EE:37:49:0A:81:AF:14:7B:79:3D:97:C5:8C:10:88` | 2.9.2 |
    | debug (`~/.android/debug.keystore`, **the Windows machine holding the zip-seeded clone**) | `0F:57:86:B9:D3:2D:77:FB:D7:05:92:0C:B0:68:CA:03:0C:18:0A:1D:5C:FE:57:FD:20:8B:DD:8D:8B:04:A1:46` | 23 Sep 2026 |
+   | debug (`~/.android/debug.keystore`, **the machine that built 3.1.0**, `C:\Users\User`) — **not registered yet** | `26:3E:A4:83:BE:45:EA:89:80:99:7B:35:C5:14:A4:CE:DE:C9:1C:CC:1F:0C:2A:44:71:4A:A9:A4:A0:B1:54:AC` | 25 Sep 2026 |
    | release — **superseded**, signed 2.8.0–2.9.1 | `EF:2E:14:D5:A2:C4:4D:19:72:58:CD:A7:8D:50:18:57:63:C7:ED:60:FD:77:6A:5E:EE:CC:CC:8B:1F:C8:8D:FC` | — |
    | debug — superseded, signed 2.8.0–2.9.1 | `84:45:C3:F4:A6:C4:F4:D8:23:72:FC:84:D6:84:30:BF:52:4B:2B:71:2B:9A:F8:1C:DD:AC:C0:60:22:44:60:11` | — |
 
@@ -861,12 +934,17 @@ and the empty state told advisers to "ask the school registrar", who has no tool
 Both halves now exist: the class name is set in Edit profile, and students are added with
 their linking code.
 
-## Screens (18)
+## Screens (20)
 
 Splash · Login · Role Selection · Sign-up · Parent Linking · Student Dashboard ·
 Teacher Dashboard · Parent Dashboard · Earthquake Alert · Safety Confirmation ·
 Live Safety Dashboard · Alert History · Demo Mode · Emergency Contacts · Settings ·
-Safety Guide · **Edit Profile** · **Parents & Guardians**
+Safety Guide · **Edit Profile** · **Parents & Guardians** · **Recent Earthquakes** ·
+**Student Location**
+
+Recent Earthquakes is reached from Alert History (every role) and the parent dashboard.
+Student Location opens from a roster row carrying a pin — adviser roster, live roll call,
+parent dashboard — and only while that student is sharing for an open event.
 
 Safety Guide is not in the prototype; it is carried over from the shipped v1.0 APK and
 uses the 28 recovered `ic_sg_*` pictograms. It is reachable from **all three roles** —
@@ -917,6 +995,28 @@ It appears on the full-screen alert, the student status panel, history rows, the
 roll-call header, the safety-confirmation screen and both platforms' notification
 bodies. The Demo screen shows it via `asG(3)` as before.
 
+### The single numeral — `Intensity.peisFromPga`
+
+The band ("Intensity V–VI") drives colour, sound and behaviour and is unchanged. Beside
+it, v3.1.0 adds a **point estimate** — "Intensity V" — for "Magnitude 4.4 · Intensity V",
+the spoken alert, and the cross-check record. One function in `Models.kt` owns it:
+
+| PGA (g) | ≥0.0017 | ≥0.0049 | ≥0.014 | ≥0.039 | ≥0.092 | ≥0.18 | ≥0.34 | ≥0.65 | ≥1.24 |
+|---|---|---|---|---|---|---|---|---|---|
+| numeral | II | III | IV | V | VI | VII | VIII | IX | X |
+
+Those are the **Wald et al. (1999)** PGA → instrumental-intensity breakpoints USGS
+ShakeMap uses (its combined II–III bin split at the geometric midpoint), then **clamped
+into the paper's band** for that g value, so the numeral can never contradict the colour:
+0.011 g reads V (not III), 0.13 g reads VII (not VI). Two consequences worth stating in the
+paper: Wald's table is calibrated against **Modified Mercalli, not PEIS** — the scales run
+close from I to X, which is why it serves as an estimate — and **IV is unreachable**,
+because Green ends at 0.010 g and IV starts at 0.014 g. Demo's 0.005 / 0.050 / 0.300 read
+III / V / VII.
+
+If the paper settles on different numeral boundaries, change `PEIS_BREAKS_G` and nothing
+else. The firmware shows bands only; if the LCD ever shows a numeral, mirror this table.
+
 ## Theme
 
 **Light-only, deliberately.** `SirenTheme` ignores the system dark setting; there is no
@@ -948,6 +1048,14 @@ alerts/{alertId}
 
 alerts/{alertId}/responses/{userId}
   userId, name, status ("safe"|"needs_help"|"no_response"), respondedAt
+
+alerts/{alertId}/locations/{userId}         # v3.1.0 — opted-in students, open events only
+  userId, name, classId, lat, lng, accuracyM, locatedAt, expiresAt
+
+alerts/{alertId}/verification/feed          # v3.1.0 — official-catalogue verdict
+  status ("confirmed"|"unconfirmed"), catalog ("EMSC"|"USGS"), eventId,
+  magnitude, magnitudeType, region, agency, eventTimeMillis, depthKm, distanceKm,
+  sensorPeis, checkedAt
 
 linkRequests/{studentId}_{parentId}
   studentId, studentName, parentId, parentName, parentContact
@@ -983,6 +1091,13 @@ hardware not writing. The order is: add the field to `AlertDoc` and `AlertRecord
 field from the firmware or a Cloud Function. Defaults are what keep the hundreds of
 existing documents decoding.
 
+That is why **locations and verification verdicts are subcollections, not alert fields**:
+builds already on phones never read them, so they could ship without the two-step dance.
+Locations are also separate from `responses` so rules can lock them to guardians and
+adviser (see *Next phase → 1*) without hiding the roll call the whole class reads.
+`locations` carries the student's `classId` because the adviser's query — and the rule —
+filters on it.
+
 The `alerts` collection also carries a lot of old `SIMULATOR` test documents. Clearing
 them before a demo makes real behaviour much easier to see.
 
@@ -994,15 +1109,15 @@ them before a demo makes real behaviour much easier to see.
 
 ## Shipping an APK
 
-`dist/` currently holds **v2.9.2**. The next build carrying the second-phase work is
-**v3.0.0**, and the version bump is part of the change, not an afterthought: Android
-refuses to install an APK whose `versionCode` is not higher than the installed one,
-and it says only "App not installed".
+`dist/debug/` holds **v3.1.0** (versionCode 11); `dist/release/` still holds **v2.9.2**.
+The version bump is part of every change, not an afterthought: Android refuses to
+install an APK whose `versionCode` is not higher than the installed one, and it says
+only "App not installed".
 
 1. Bump both fields in `app/build.gradle.kts`. They move together:
    ```kotlin
-   versionCode = 10        // was 9
-   versionName = "3.0.0"   // was "2.9.2"
+   versionCode = 12        // was 11
+   versionName = "3.1.1"   // was "3.1.0"
    ```
 2. Build from the project root, with JDK 17:
    ```powershell
@@ -1012,16 +1127,16 @@ and it says only "App not installed".
 3. Copy the artifacts in under the existing naming convention and delete the previous
    pair, so `dist/` never holds two versions of the same variant:
    ```
-   app/build/outputs/apk/debug/app-debug.apk      -> dist/debug/SIREN-v3.0.0-debug.apk
-   app/build/outputs/apk/release/app-release.apk  -> dist/release/SIREN-v3.0.0-release.apk
+   app/build/outputs/apk/debug/app-debug.apk      -> dist/debug/SIREN-v<version>-debug.apk
+   app/build/outputs/apk/release/app-release.apk  -> dist/release/SIREN-v<version>-release.apk
    ```
 4. Update `dist/debug/README.md` and `dist/release/README.md`: version, date, size,
    and what changed. Those files are the record of what a given APK actually contains.
 5. Verify the release APK before trusting it. A passing build proves nothing about the
    two things that have silently broken before:
    ```powershell
-   apksigner verify --print-certs dist\release\SIREN-v3.0.0-release.apk
-   aapt2 dump resources dist\release\SIREN-v3.0.0-release.apk | Select-String "raw/siren_alarm"
+   apksigner verify --print-certs dist\release\SIREN-v<version>-release.apk
+   aapt2 dump resources dist\release\SIREN-v<version>-release.apk | Select-String "raw/siren_alarm"
    ```
    The fingerprint must match the key recorded below, and the alarm audio must resolve
    through the resource table. Do not look for `res/raw/siren_alarm.mp3` by path — see
@@ -1029,8 +1144,9 @@ and it says only "App not installed".
 6. Install it on a real phone and walk Demo Mode through all three tiers. Nothing in
    `dist/README.md` has ever been run; it only records that the code compiled.
 
-A release build needs `keystore.properties` and `siren-release.jks` restored first, or
-it comes out unsigned without complaining.
+A release build needs `env.local` and `siren-release.jks` restored first. Without them
+it still comes out unsigned, but Gradle now at least warns when `env.local` names a
+`storeFile` that is not there.
 
 ## The release signing key — do not generate another one
 
@@ -1070,12 +1186,12 @@ phone sign-up fails on release builds with "This app is not authorized".
 on the one disk that built the last release, it is gitignored so no clone or zip export
 carries it, and the project moves between machines constantly. A clone on a new machine
 always starts with no key. Storing it somewhere that follows the *person* — a password
-manager attachment, an encrypted synced archive — is the fix; `keystore.properties` must
+manager attachment, an encrypted synced archive — is the fix; `env.local` must
 travel with the `.jks`, because either file alone is useless.
 
-**The password is deliberately not written here.** This file is committed; the
-keystore's value depends on the password not living beside a public description of
-where the keystore is. Read it out of `keystore.properties`.
+**The password is deliberately not written here.** This file is committed — and the
+repo is **public** since 25 Sep 2026 — so the keystore's value depends on the password
+never living beside a description of where the keystore is. Read it out of `env.local`.
 
 Check a suspected keystore against the fingerprint above before assuming it is lost:
 
@@ -1095,8 +1211,14 @@ referenced in `dist/README.md`, **does not exist** — use `keytool` directly.
 
 ## Secrets — not in this repo
 
-`.gitignore` excludes `keystore.properties` and `*.jks`. A fresh clone needs both
-restored before it can build a release.
+`.gitignore` excludes `env.local`, `keystore.properties` and `*.jks`. A fresh clone
+needs `env.local` and the `.jks` restored before it can build a release.
+
+**Release signing values live in `env.local`** at the repo root: `storeFile`,
+`storePassword`, `keyAlias`, `keyPassword` — the same four keys `keystore.properties`
+used, so an old one pastes in unchanged. `env.local.example` is the committed template
+and must never hold a real value. `app/build.gradle.kts` reads `env.local` first and
+falls back to `keystore.properties`, so a machine that has not moved over still signs.
 
 The firmware has its own `firmware/siren_esp32/secrets.h`, also gitignored, holding
 the WiFi credentials, the Firebase project id and web API key, and the ESP32's own
@@ -1113,11 +1235,23 @@ The device signs in as its own Firebase user, `esp32@siren.local`, which must ex
 under Authentication → Users. `INVALID_LOGIN_CREDENTIALS` on the serial log means it
 does not; `API_KEY_INVALID` means the web API key is wrong.
 
-`app/google-services.json` **is now committed**, deliberately, at the project
-owner's direction — `:app` cannot build a single task without it, the repo is
-private, and the file ships inside every APK anyway. The `.gitignore` entry for it
-is retained but has no effect on a tracked file. The signing key is a different
-matter and stays out.
+`app/google-services.json` is **not** in the repo, and never was — an earlier version
+of this file said it had been committed, but `git log --all` has never seen it. It is
+gitignored, and now that the repo is **public** (25 Sep 2026) it should stay that way.
+`:app` cannot build a single task without it, so a fresh clone restores it one of two
+ways:
+
+- **Download it** from the Firebase console → project `quicktrip-fe547` → Android app
+  `com.research.siren`. Preferred: it is the real file.
+- **Rebuild it from any APK already in `dist/`.** The Google Services plugin bakes every
+  value into string resources, so `aapt2 dump resources <apk>` shows
+  `gcm_defaultSenderId` (project number), `google_app_id`, `google_api_key`,
+  `google_storage_bucket`, `project_id` and `firebase_database_url`; those fill
+  `project_info` and a single `client` with `package_name` `com.research.siren` and an
+  empty `oauth_client` list. That is how the 25 Sep 2026 build machine got its copy, and
+  the resulting APK carried identical values. The API key is not a secret in the usual
+  sense — it ships inside every APK — but it only stays harmless while Firestore rules do
+  the protecting, which the permissive rules currently do not.
 
 ## Out of scope
 
@@ -1141,4 +1275,18 @@ matter and stays out.
    sensor reads, `C` for a clean `health,ok`, then shake the board and confirm
    `TRIAL` and `CLOUD,OK` on serial, a document in the `alerts` collection, and the
    alert on a phone. Test it once with the app open and once with it swiped away —
-   the second case does not work yet, and that is the point of **Next phase → 0**.
+   the second case works only once the Cloud Function is deployed (**Next phase → 0**).
+7. **Spoken alert (v3.1.0)**: trigger Yellow and Red from Demo Mode. The siren must play
+   one full cycle, pause, "This is a drill, not a real earthquake. Earthquake. Intensity
+   five/seven…" must be heard **with the phone on silent**, and the siren must come back.
+   Repeat with Settings → Spoken alert off: siren only.
+8. **Location sharing (v3.1.0)** — needs a student, their confirmed guardian and their
+   adviser on three phones. Switch it on in the student's Settings (the prompt appears
+   there); trigger Red; the alert must show the "location is shared" strip; the guardian's
+   and adviser's rows must show a pin that opens the map. Tap **Stop** — the pin must
+   disappear. Close the event — it must disappear for any student still sharing. Then deny
+   the permission in Android settings and confirm the switch reads off.
+9. **Official data (v3.1.0)**: open History → Recent earthquakes; the list must name EMSC
+   (or USGS) and never PHIVOLCS. For a real sensor alert, the live roll call should read
+   "Checking" and then, within ~30 minutes, CONFIRMED with a magnitude or UNCONFIRMED;
+   the verdict should appear at `alerts/{id}/verification/feed`.
