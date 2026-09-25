@@ -14,21 +14,14 @@ before starting anything new.
 This repo holds **both** halves: the app (`shared/`, `app/`, `iosApp/`) and the
 firmware (`firmware/siren_esp32/`).
 
-### Read this before running anything
+### Repo layout
 
-Everything is nested one level deep, under **`Research-main/`**, because the repo was
-seeded from a zip export rather than a clone. `gradlew` and the module roots live
-there, not at the repo root. Either `cd Research-main` first, or flatten it once and
-never think about it again:
-
-```bash
-git mv Research-main/* Research-main/.gitignore .
-rmdir Research-main
-git commit -m "Flatten the repo: move everything out of Research-main/"
-```
-
-Flattening is the better fix. Paths in this file are written relative to the project
-root, which is `Research-main/` until that is done.
+The repo was seeded from a zip export, so everything used to sit one level down under
+`Research-main/`. It was flattened on 25 Sep 2026: `gradlew`, the module roots and this
+file now live at the repo root, and every path in this file is relative to it. A clone
+made before that date still has the nested layout until it pulls; an old working copy
+with uncommitted changes under `Research-main/` should commit or stash them first, and
+git's rename detection carries them across on the pull.
 
 ---
 
