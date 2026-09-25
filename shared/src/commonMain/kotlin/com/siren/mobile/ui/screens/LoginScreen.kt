@@ -3,17 +3,22 @@ package com.siren.mobile.ui.screens
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Pin
+import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -40,6 +45,12 @@ import com.siren.mobile.ui.theme.Layout
 import com.siren.mobile.ui.theme.Space
 import org.jetbrains.compose.resources.painterResource
 
+private const val LOGIN_CODE_LENGTH = 6
+
+/**
+ * @param phoneSupported shows the Email / Phone choice. Accounts made with "Sign up with
+ *   Phone" have no password, so without it they had no way back in from this screen.
+ */
 @Composable
 fun LoginScreen(
     loading: Boolean,
@@ -47,10 +58,20 @@ fun LoginScreen(
     onSignIn: (email: String, password: String) -> Unit,
     onCreateAccount: () -> Unit,
     onForgotPassword: (email: String) -> Unit,
+    phoneSupported: Boolean = false,
+    codeSent: Boolean = false,
+    onSendCode: (phone: String) -> Unit = {},
+    onVerifyCode: (code: String) -> Unit = {},
+    onCancelPhone: () -> Unit = {},
 ) {
+    var method by remember { mutableStateOf(SignUpMethod.EMAIL) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
     val canSubmit = email.isNotBlank() && password.isNotBlank()
+    val usePhone = phoneSupported && method == SignUpMethod.PHONE
+    val phoneValid = phone.count { it.isDigit() } >= 10
 
     Column(
         Modifier
@@ -85,40 +106,114 @@ fun LoginScreen(
             InfoBanner(error, Icons.Filled.Lock, tone = BannerTone.Danger)
         }
 
-        SirenField(
-            value = email,
-            onValueChange = { email = it },
-            label = "Email",
-            placeholder = "Enter your campus email",
-            leadingIcon = Icons.Filled.Mail,
-            keyboardType = KeyboardType.Email,
-        )
-
-        SirenField(
-            value = password,
-            onValueChange = { password = it },
-            label = "Password",
-            placeholder = "Enter your password",
-            leadingIcon = Icons.Filled.Lock,
-            isPassword = true,
-        )
-
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-            TextButton(onClick = { onForgotPassword(email) }) {
-                Text("Forgot password?")
+        if (phoneSupported && !codeSent) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Space.s),
+            ) {
+                SignUpMethod.entries.forEach { m ->
+                    FilterChip(
+                        selected = method == m,
+                        onClick = { method = m },
+                        label = { Text("Sign in with ${m.label}") },
+                        shape = RoundedCornerShape(Layout.pill),
+                    )
+                }
             }
         }
 
-        PrimaryButton(
-            text = "Sign in",
-            onClick = { onSignIn(email, password) },
-            enabled = canSubmit,
-            loading = loading,
-        )
+        if (usePhone) {
+            SirenField(
+                value = phone,
+                onValueChange = { phone = it.filter { c -> c.isDigit() || c == '+' || c == ' ' } },
+                label = "Mobile number",
+                placeholder = "09XX XXX XXXX",
+                leadingIcon = Icons.Filled.Smartphone,
+                keyboardType = KeyboardType.Phone,
+                supportingText = "The number you signed up with. We'll text you a 6-digit code.",
+                enabled = !codeSent,
+            )
+
+            if (codeSent) {
+                SirenField(
+                    value = code,
+                    onValueChange = { code = it.filter { c -> c.isDigit() }.take(LOGIN_CODE_LENGTH) },
+                    label = "Verification code",
+                    leadingIcon = Icons.Filled.Pin,
+                    keyboardType = KeyboardType.NumberPassword,
+                    supportingText = "Sent to $phone",
+                )
+                PrimaryButton(
+                    text = "Verify and sign in",
+                    onClick = { onVerifyCode(code) },
+                    enabled = code.length == LOGIN_CODE_LENGTH,
+                    loading = loading,
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = { onSendCode(phone) }, enabled = !loading) {
+                        Text("Resend code")
+                    }
+                    TextButton(
+                        onClick = {
+                            code = ""
+                            onCancelPhone()
+                        },
+                        enabled = !loading,
+                    ) {
+                        Text("Change number")
+                    }
+                }
+            } else {
+                PrimaryButton(
+                    text = "Send code",
+                    onClick = { onSendCode(phone) },
+                    enabled = phoneValid,
+                    loading = loading,
+                )
+            }
+        } else {
+            SirenField(
+                value = email,
+                onValueChange = { email = it },
+                label = "Email",
+                placeholder = "Enter your campus email",
+                leadingIcon = Icons.Filled.Mail,
+                keyboardType = KeyboardType.Email,
+            )
+
+            SirenField(
+                value = password,
+                onValueChange = { password = it },
+                label = "Password",
+                placeholder = "Enter your password",
+                leadingIcon = Icons.Filled.Lock,
+                isPassword = true,
+            )
+
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                TextButton(onClick = { onForgotPassword(email) }) {
+                    Text("Forgot password?")
+                }
+            }
+
+            PrimaryButton(
+                text = "Sign in",
+                onClick = { onSignIn(email, password) },
+                enabled = canSubmit,
+                loading = loading,
+            )
+        }
 
         SecondaryButton(
             text = "Create an account",
-            onClick = onCreateAccount,
+            onClick = {
+                onCancelPhone()
+                onCreateAccount()
+            },
             icon = Icons.Filled.PersonAdd,
         )
 

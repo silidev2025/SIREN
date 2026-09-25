@@ -16,9 +16,17 @@ named `SIREN-v<version>-debug.apk`.
 
 | File | Version | Size | Built |
 |---|---|---|---|
-| `SIREN-v3.1.1-debug.apk` | 3.1.1 (versionCode 12) | 25.8 MB | 25 Sep 2026 |
+| `SIREN-v3.1.2-debug.apk` | 3.1.2 (versionCode 13) | 25.8 MB | 25 Sep 2026 |
 
-**3.1.1 fixes how Recent earthquakes names places**, after comparing it with PHIVOLCS's
+**3.1.2 adds phone sign-in.** The sign-in screen only ever offered email and password, so
+an account created with "Sign up with Phone" had no way back in except through the sign-up
+screen. It now has the same Email / Phone choice as sign-up. A number with no SIREN account
+is signed straight back out with "No SIREN account uses that number yet" rather than left on
+the profile spinner. Same debug key, so it installs over 3.1.0 and 3.1.1. Version, key,
+resources, alarm audio and the TTS query re-checked; 16 host tests pass. **The phone path
+itself is untested on a device** — it needs an SMS.
+
+**3.1.1 fixed how Recent earthquakes names places**, after comparing it with PHIVOLCS's
 bulletin. EMSC filed an M4.2 eleven kilometres from Bogo under "Leyte, Philippines"; any
 event within 50 km of the sensor is now titled "Near Bogo · 12 km", every row shows
 coordinates, and the notes say magnitudes can differ from PHIVOLCS by several tenths (4.6

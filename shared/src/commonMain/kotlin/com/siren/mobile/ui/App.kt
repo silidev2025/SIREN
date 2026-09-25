@@ -46,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.siren.mobile.data.LinkResult
+import com.siren.mobile.data.PhoneLoginResult
 import com.siren.mobile.data.QuakeFeed
 import com.siren.mobile.data.SirenRepository
 import com.siren.mobile.model.AlertSource
@@ -281,6 +282,30 @@ private fun AppShell() {
             onCancelPhone = {
                 phoneVerification = null
                 repo.clearAuthError()
+            },
+            onSendLoginCode = { phone ->
+                scope.launch {
+                    when (val result = repo.sendPhoneCode(phone)) {
+                        is PhoneCodeRequest.Sent -> phoneVerification = result.verification
+                        is PhoneCodeRequest.AutoVerified -> {
+                            phoneVerification = null
+                            repo.completeAutoVerifiedLogin(result.uid)
+                        }
+
+                        is PhoneCodeRequest.Failed -> phoneVerification = null
+                    }
+                }
+            },
+            onVerifyLoginCode = { code ->
+                phoneVerification?.let { v ->
+                    scope.launch {
+                        // A wrong code keeps the code field up for another try; success or
+                        // "no account" both end this verification.
+                        if (repo.signInWithPhoneCode(v, code) != PhoneLoginResult.RETRY) {
+                            phoneVerification = null
+                        }
+                    }
+                }
             },
             onForgot = { email -> scope.launch { repo.resetPassword(email) } },
             onClearError = { repo.clearAuthError() },
@@ -722,10 +747,18 @@ private fun AuthFlow(
     onSendCode: (name: String, phone: String, role: Role) -> Unit,
     onVerifyCode: (name: String, code: String, role: Role) -> Unit,
     onCancelPhone: () -> Unit,
+    onSendLoginCode: (phone: String) -> Unit,
+    onVerifyLoginCode: (code: String) -> Unit,
     onForgot: (String) -> Unit,
     onClearError: () -> Unit,
 ) {
-    var step by remember { mutableStateOf(if (startOnSignUp) STEP_ROLE else STEP_LOGIN) }
+    // Start on Login whenever there is an error to show. A phone sign-in for a number with no
+    // account signs in and straight back out, which rebuilds this flow from scratch — on a
+    // fresh install that would otherwise land on role selection, which has no room for the
+    // "no account uses that number" message explaining why.
+    var step by remember {
+        mutableStateOf(if (startOnSignUp && error == null) STEP_ROLE else STEP_LOGIN)
+    }
     var role by remember { mutableStateOf(Role.STUDENT) }
 
     fun leaveSignUp(target: Int) {
@@ -755,6 +788,11 @@ private fun AuthFlow(
                     step = STEP_ROLE
                 },
                 onForgotPassword = onForgot,
+                phoneSupported = phoneSupported,
+                codeSent = codeSent,
+                onSendCode = onSendLoginCode,
+                onVerifyCode = onVerifyLoginCode,
+                onCancelPhone = onCancelPhone,
             )
 
             STEP_ROLE -> RoleSelectionScreen(

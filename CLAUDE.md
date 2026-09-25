@@ -33,7 +33,7 @@ git's rename detection carries them across on the pull.
 | `:app` | ⚠️ Thin Android host (3 files). Builds only where `app/google-services.json` has been restored — see **Secrets**. |
 | `iosApp/` | ⚠️ Swift sources + Podfile written, **never compiled**. Needs a Mac — see below. |
 | `firmware/` | ✅ **v3.0-mpu6050**, committed 23 Sep 2026, matching the board. The v2.0 ADXL335 sketch — and the optional SIM800L GSM-SMS fallback that only it carried — stay in history at `fcff24a`. See **Firmware**. |
-| Shipped APK | `dist/debug/` holds **v3.1.1** (Next phase 0–4); `dist/release/` still holds **v2.9.2** — see **Shipping an APK** and **The release signing key**. |
+| Shipped APK | `dist/debug/` holds **v3.1.2** (Next phase 0–4, phone sign-in); `dist/release/` still holds **v2.9.2** — see **Shipping an APK** and **The release signing key**. |
 
 ```powershell
 $env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot"   # per-machine
@@ -737,7 +737,28 @@ been removed — it lost accounts on reinstall, breaking parent links and histor
   roll call.
 - The **ESP32 has its own account** and writes alert documents directly; the app only listens
 
-### Phone sign-up
+### Phone sign-up and sign-in
+
+**Sign-in by phone exists since v3.1.2.** Until then the sign-in screen only offered email
+and password, so an account made with "Sign up with Phone" — which has no password — could
+only get back in through the sign-up screen (which works, because sign-up writes a profile
+only when none exists). The sign-in screen now has the same Email / Phone choice.
+
+Firebase has no separate phone *sign-up*: confirming a code for an unknown number silently
+creates an auth user. Sign-up answers that by writing the profile; sign-in cannot, having no
+name or role, so `signInWithPhoneCode` checks for the profile and, if there is none, signs
+straight back out with "No SIREN account uses that number yet" (`PhoneLoginResult.NO_ACCOUNT`).
+The auth user is left in place, not deleted: a later sign-up with that number reuses the same
+uid. A failed profile read counts as "exists", so a flaky connection never signs someone out
+of a real account. That sign-in-then-out rebuilds `AuthFlow`, which is why it starts on the
+Login step whenever there is an error to show.
+
+**On a sideloaded APK the code is preceded by a browser "I'm not a robot" page.** Firebase
+cannot vouch for an app that did not come from the Play Store, so it falls back to reCAPTCHA
+in the phone's default browser. **Brave breaks it** — the page stops at "Unable to process
+request due to missing initial state", because Brave blocks the session storage the page
+relies on. Chrome as the default browser works. Not an app fault, and not fixable from the
+app.
 
 Implemented on **Android only**, through `PlatformServices.sendPhoneCode` /
 `confirmPhoneCode` — the same seam Cloud Messaging uses, because GitLive KMP 2.5.0 wraps
@@ -1127,15 +1148,15 @@ them before a demo makes real behaviour much easier to see.
 
 ## Shipping an APK
 
-`dist/debug/` holds **v3.1.1** (versionCode 12); `dist/release/` still holds **v2.9.2**.
+`dist/debug/` holds **v3.1.2** (versionCode 13); `dist/release/` still holds **v2.9.2**.
 The version bump is part of every change, not an afterthought: Android refuses to
 install an APK whose `versionCode` is not higher than the installed one, and it says
 only "App not installed".
 
 1. Bump both fields in `app/build.gradle.kts`. They move together:
    ```kotlin
-   versionCode = 13        // was 12
-   versionName = "3.1.2"   // was "3.1.1"
+   versionCode = 14        // was 13
+   versionName = "3.1.3"   // was "3.1.2"
    ```
 2. Build from the project root, with JDK 17:
    ```powershell

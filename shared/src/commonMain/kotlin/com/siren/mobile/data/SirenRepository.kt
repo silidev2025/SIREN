@@ -292,6 +292,57 @@ object SirenRepository {
         }.onFailure { _authError.value = authMessage(it as? Exception ?: Exception(it)) }
     }
 
+    /**
+     * Phone **sign-in**, for an account that already exists.
+     *
+     * Firebase has no separate sign-up for phone numbers: confirming a code for an unknown
+     * number silently creates a new auth user. Sign-up handles that by writing a profile;
+     * sign-in must not, because it has no name or role to write, and an auth user without a
+     * profile leaves the app on the "profile loading" spinner forever. So a number with no
+     * SIREN profile is signed straight back out and told to create an account — the same
+     * uid is reused when it does, so nothing is orphaned.
+     */
+    suspend fun signInWithPhoneCode(verification: PhoneVerification, code: String): PhoneLoginResult {
+        _authLoading.value = true
+        _authError.value = null
+        return try {
+            when (val outcome = Platform.services.confirmPhoneCode(verification, code.trim())) {
+                is PhoneVerification.Result.Failed -> {
+                    _authError.value = outcome.reason
+                    PhoneLoginResult.RETRY
+                }
+
+                is PhoneVerification.Result.SignedIn -> requireExistingProfile(outcome.uid)
+            }
+        } catch (e: Exception) {
+            _authError.value = authMessage(e)
+            PhoneLoginResult.RETRY
+        } finally {
+            _authLoading.value = false
+        }
+    }
+
+    /** The sign-in counterpart of [completeAutoVerifiedPhone], for a SIM verified without a code. */
+    suspend fun completeAutoVerifiedLogin(uid: String): PhoneLoginResult =
+        runCatching { requireExistingProfile(uid) }.getOrElse {
+            _authError.value = authMessage(it as? Exception ?: Exception(it))
+            PhoneLoginResult.RETRY
+        }
+
+    private suspend fun requireExistingProfile(uid: String): PhoneLoginResult {
+        // A failed read is not proof of absence: let the profile listener sort it out rather
+        // than signing someone out of a real account over a flaky connection.
+        val exists = runCatching { usersCol.document(uid).get().exists }.getOrDefault(true)
+        if (!exists) {
+            runCatching { auth.signOut() }
+            _authError.value = "No SIREN account uses that number yet. Tap \"Create an account\" " +
+                "and choose Sign up with Phone."
+            return PhoneLoginResult.NO_ACCOUNT
+        }
+        markHasAccount()
+        return PhoneLoginResult.SIGNED_IN
+    }
+
     private fun normalisePhone(raw: String): String {
         val cleaned = raw.filter { it.isDigit() || it == '+' }
         return when {
