@@ -33,7 +33,7 @@ git's rename detection carries them across on the pull.
 | `:app` | ⚠️ Thin Android host (3 files). Builds only where `app/google-services.json` has been restored — see **Secrets**. |
 | `iosApp/` | ⚠️ Swift sources + Podfile written, **never compiled**. Needs a Mac — see below. |
 | `firmware/` | ✅ **v3.0-mpu6050**, committed 23 Sep 2026, matching the board. The v2.0 ADXL335 sketch — and the optional SIM800L GSM-SMS fallback that only it carried — stay in history at `fcff24a`. See **Firmware**. |
-| Shipped APK | `dist/debug/` holds **v3.1.0** (Next phase 0–4); `dist/release/` still holds **v2.9.2**, because the machine that built 3.1.0 has no release key and which key to use is still open — see **Shipping an APK** and **The release signing key**. |
+| Shipped APK | `dist/debug/` holds **v3.1.1** (Next phase 0–4); `dist/release/` still holds **v2.9.2** — see **Shipping an APK** and **The release signing key**. |
 
 ```powershell
 $env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot"   # per-machine
@@ -465,10 +465,28 @@ because this tracks minors:
 earthquakes* (from History, and the parent dashboard) lists M3+ in the Philippine box
 (lat 4–21, lon 116–127) over the past week, with the catalogue, magnitude type and
 contributing agency on every row. EMSC often relays PHIVOLCS's own solution, which shows
-as "agency PHIV"; the screen still never calls the data PHIVOLCS's, and its banner carries
-the honest limits: global networks, minutes behind, can miss small local events, may differ
-from PHIVOLCS by a tenth or two, revised after publication. A **confirmation** source,
-never the warning.
+as "agency PIVS" (EMSC's code for PHIVOLCS); the screen still never calls the data
+PHIVOLCS's, and its banner carries the honest limits: global networks, minutes behind, miss
+most events below M3, may differ from PHIVOLCS by several tenths, revised after
+publication. A **confirmation** source, never the warning.
+
+**Checked against PHIVOLCS's own bulletin on 25 Sep 2026**, and worth knowing before
+anyone compares the two screens:
+
+- **Region names are broad and can mislead.** EMSC uses Flinn-Engdahl regions; the sea
+  just east of Bogo is in the one it calls **"Leyte"**, so the 22 Sep M4.2 eleven
+  kilometres from the school appeared as a Leyte earthquake. Since v3.1.1 any event within
+  50 km of the sensor is titled **"Near Bogo · 12 km"** with the region demoted to the
+  detail line, and every row shows coordinates to two decimals — PHIVOLCS's precision — so
+  rows can be matched by time and position. PHIVOLCS itself names the nearest town
+  ("014 km S 47° W of Maitum (Sarangani)"), never "Mindanao".
+- **Magnitudes differ by more than a tenth or two.** 22 Sep near Bogo: EMSC 4.6 (its own
+  solution), PHIVOLCS 4.2. 25 Sep off Sarangani: EMSC 3.2 (relaying PHIVOLCS's first
+  estimate), PHIVOLCS's bulletin 3.5 after revision.
+- **Most local events never reach the global catalogues.** PHIVOLCS listed ~40 events near
+  Bogo in September 2026, mostly M1.5–2.9; EMSC carried two of the past week's, the two at
+  M3 and above. A sensor alert from a small local quake will therefore often come out
+  UNCONFIRMED even though PHIVOLCS recorded it — say so in the paper.
 
 **Cross-referencing** (`QuakeFeed.verify`) is the research angle: for each sensor alert it
 asks both catalogues for events within ~830 km of the node from 10 minutes before to 2
@@ -1109,15 +1127,15 @@ them before a demo makes real behaviour much easier to see.
 
 ## Shipping an APK
 
-`dist/debug/` holds **v3.1.0** (versionCode 11); `dist/release/` still holds **v2.9.2**.
+`dist/debug/` holds **v3.1.1** (versionCode 12); `dist/release/` still holds **v2.9.2**.
 The version bump is part of every change, not an afterthought: Android refuses to
 install an APK whose `versionCode` is not higher than the installed one, and it says
 only "App not installed".
 
 1. Bump both fields in `app/build.gradle.kts`. They move together:
    ```kotlin
-   versionCode = 12        // was 11
-   versionName = "3.1.1"   // was "3.1.0"
+   versionCode = 13        // was 12
+   versionName = "3.1.2"   // was "3.1.1"
    ```
 2. Build from the project root, with JDK 17:
    ```powershell

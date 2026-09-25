@@ -26,7 +26,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.siren.mobile.data.QuakeFeed
 import com.siren.mobile.model.Quake
-import com.siren.mobile.model.SensorNodes
 import com.siren.mobile.ui.components.BannerTone
 import com.siren.mobile.ui.components.EmptyState
 import com.siren.mobile.ui.components.ErrorState
@@ -35,13 +34,16 @@ import com.siren.mobile.ui.components.ListGroup
 import com.siren.mobile.ui.components.ListRow
 import com.siren.mobile.ui.components.RowDivider
 import com.siren.mobile.ui.components.SkeletonList
+import com.siren.mobile.ui.components.coordinatesText
+import com.siren.mobile.ui.components.distanceFromSensorKm
+import com.siren.mobile.ui.components.isNearSensor
+import com.siren.mobile.ui.components.placeName
 import com.siren.mobile.ui.components.sourceText
 import com.siren.mobile.ui.theme.Layout
 import com.siren.mobile.ui.theme.SirenTheme
 import com.siren.mobile.ui.theme.Space
 import com.siren.mobile.util.DateFmt
 import com.siren.mobile.util.asKm
-import com.siren.mobile.util.distanceKm
 import com.siren.mobile.util.tabular
 import com.siren.mobile.util.toFixed
 
@@ -84,9 +86,11 @@ fun OfficialQuakesScreen(
             InfoBanner(
                 "Magnitude 3 and above in and around the Philippines over the past 7 days, " +
                     "from ${loaded?.catalog?.fullName ?: "EMSC, or USGS as a fallback"}. " +
-                    "This is not PHIVOLCS data. Global networks run minutes behind, can miss " +
-                    "small local events, may differ from PHIVOLCS by a tenth or two, and revise " +
-                    "their figures after publication.",
+                    "This is not PHIVOLCS data. Global networks run minutes behind, miss most " +
+                    "events below magnitude 3, can differ from PHIVOLCS by several tenths " +
+                    "(especially in the first hours), and revise their figures after " +
+                    "publication. Region names are broad; PHIVOLCS names the nearest town, so " +
+                    "match rows by time and coordinates.",
                 Icons.Filled.Info,
                 tone = BannerTone.Neutral,
             )
@@ -136,8 +140,8 @@ fun OfficialQuakesScreen(
 
 @Composable
 private fun QuakeRow(quake: Quake) {
-    val node = SensorNodes.BOGO
-    val km = distanceKm(node.lat, node.lng, quake.lat, quake.lng)
+    val km = quake.distanceFromSensorKm()
+    val near = quake.isNearSensor()
     val s = SirenTheme.status
     val (fg, bg) = when {
         quake.magnitude >= 6.0 -> s.onDangerContainer to s.dangerContainer
@@ -146,9 +150,18 @@ private fun QuakeRow(quake: Quake) {
     }
 
     ListRow(
-        title = quake.region.ifBlank { "Philippine region" },
-        subtitle = "${DateFmt.dateTime(quake.time)} · depth ${quake.depthKm.asKm()} · " +
-            "${km.asKm()} away · ${quake.sourceText()}",
+        // Close to the sensor the catalogue's region name misleads (EMSC files the sea just
+        // east of Bogo under "Leyte"), so the row leads with the distance instead and keeps
+        // the region as a secondary detail.
+        title = if (near) "${quake.placeName()} · ${km.asKm()}" else quake.placeName(),
+        subtitle = listOfNotNull(
+            DateFmt.dateTime(quake.time),
+            "depth ${quake.depthKm.asKm()}",
+            if (near) null else "${km.asKm()} away",
+            quake.coordinatesText(),
+            if (near && quake.region.isNotBlank()) "${quake.catalog.label} region: ${quake.region}" else null,
+            quake.sourceText(),
+        ).joinToString(" · "),
         leading = {
             Surface(
                 shape = RoundedCornerShape(Layout.tile),

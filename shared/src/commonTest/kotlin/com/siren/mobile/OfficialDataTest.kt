@@ -8,6 +8,9 @@ import com.siren.mobile.model.Quake
 import com.siren.mobile.model.QuakeCatalog
 import com.siren.mobile.model.SensorNodes
 import com.siren.mobile.model.peisNumeral
+import com.siren.mobile.ui.components.coordinatesText
+import com.siren.mobile.ui.components.isNearSensor
+import com.siren.mobile.ui.components.placeName
 import com.siren.mobile.util.IsoTime
 import com.siren.mobile.util.VoiceAlert
 import kotlin.test.Test
@@ -181,6 +184,19 @@ class QuakeFeedTest {
         val near = quake(11.30, 124.20, 4.5, T_0724)
         assertNull(QuakeFeed.bestMatch(listOf(near), alertAt(T_0724 + 10 * 60_000), SensorNodes.BOGO))
         assertNull(QuakeFeed.bestMatch(listOf(near), alertAt(T_0724 - 5 * 60_000), SensorNodes.BOGO))
+    }
+
+    @Test
+    fun eventsNearTheSensorAreNamedAfterBogoNotTheCatalogueRegion() {
+        // 22 Sep 2026 M4.2 at PHIVOLCS's 11.10 N 124.07 E, which EMSC files under "Leyte".
+        val bogo = quake(11.10, 124.07, 4.6, T_0724).copy(region = "Leyte, Philippines")
+        assertTrue(bogo.isNearSensor())
+        assertEquals("Near Bogo", bogo.placeName())
+        assertEquals("11.10°N, 124.07°E", bogo.coordinatesText())
+
+        val mindanao = QuakeFeed.parse(QuakeCatalog.EMSC, EMSC_SAMPLE.encodeToByteArray())!!.single()
+        assertEquals("Mindanao, Philippines", mindanao.placeName())
+        assertEquals("5.95°N, 124.34°E", mindanao.coordinatesText())
     }
 
     @Test

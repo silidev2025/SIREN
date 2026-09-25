@@ -35,9 +35,10 @@ import kotlinx.serialization.json.longOrNull
  * **PHIVOLCS has no public API**, and scraping its bulletin page needs a server and breaks
  * easily, so this reads EMSC (primary, better regional pickup) with USGS as the fallback.
  * Neither is PHIVOLCS and the UI must never call it that. Both are global networks running
- * minutes behind real time, so this is a *confirmation* source, never the warning: small
- * local events PHIVOLCS reports may be missing, magnitudes can differ from PHIVOLCS by a
- * tenth or two, and values are revised after first publication.
+ * minutes behind real time, so this is a *confirmation* source, never the warning: most
+ * events below M3 that PHIVOLCS reports are missing, magnitudes can differ from PHIVOLCS by
+ * several tenths (EMSC had 4.6 for a Bogo event PHIVOLCS put at 4.2, 22 Sep 2026), and
+ * values are revised after first publication.
  */
 object QuakeFeed {
 

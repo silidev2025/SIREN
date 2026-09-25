@@ -18,16 +18,44 @@ import androidx.compose.ui.text.font.FontWeight
 import com.siren.mobile.model.AlertRecord
 import com.siren.mobile.model.FeedCheck
 import com.siren.mobile.model.Quake
+import com.siren.mobile.model.SensorNodes
 import com.siren.mobile.ui.theme.SirenTheme
 import com.siren.mobile.ui.theme.Space
 import com.siren.mobile.util.DateFmt
 import com.siren.mobile.util.asGSpaced
 import com.siren.mobile.util.asKm
+import com.siren.mobile.util.distanceKm
 import com.siren.mobile.util.tabular
 import com.siren.mobile.util.toFixed
+import kotlin.math.abs
 
 /** "M 4.4" — one decimal, as every catalogue publishes it. */
 fun Quake.magnitudeText(): String = "Magnitude ${magnitude.toFixed(1)}"
+
+/**
+ * Within this distance of the sensor an event is named after the sensor's town instead of
+ * the catalogue's region. EMSC's Flinn-Engdahl regions are broad: the sea just east of Bogo
+ * falls in the one it calls "Leyte", so an M4 eleven kilometres from the school read as a
+ * Leyte earthquake while PHIVOLCS listed it as "11 km N 58° E of City of Bogo".
+ */
+private const val NEAR_SENSOR_KM = 50.0
+
+fun Quake.distanceFromSensorKm(): Double =
+    SensorNodes.BOGO.let { distanceKm(it.lat, it.lng, lat, lng) }
+
+fun Quake.isNearSensor(): Boolean = distanceFromSensorKm() <= NEAR_SENSOR_KM
+
+/** "Near Bogo" close to the sensor, otherwise the catalogue's own region name. */
+fun Quake.placeName(): String =
+    if (isNearSensor()) "Near Bogo" else region.ifBlank { "Philippine region" }
+
+/**
+ * "11.10°N, 124.08°E" — two decimals, the precision PHIVOLCS publishes, so a row can be
+ * matched against its bulletin by eye.
+ */
+fun Quake.coordinatesText(): String =
+    "${abs(lat).toFixed(2)}°${if (lat >= 0) "N" else "S"}, " +
+        "${abs(lng).toFixed(2)}°${if (lng >= 0) "E" else "W"}"
 
 /** "EMSC · mb" or "EMSC · mb · agency PHIV" — where the number came from, always shown. */
 fun Quake.sourceText(): String = listOfNotNull(
@@ -115,11 +143,12 @@ fun OfficialDataCard(
         if (check is FeedCheck.Confirmed) {
             val q = check.quake
             Text(
-                listOfNotNull(
-                    q.region.ifBlank { null },
+                listOf(
+                    q.placeName(),
                     "${check.distanceKm.asKm()} from the sensor",
                     "depth ${q.depthKm.asKm()}",
                     "origin ${DateFmt.clockSeconds(q.time)}",
+                    q.coordinatesText(),
                 ).joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -129,8 +158,8 @@ fun OfficialDataCard(
 
         Text(
             "Magnitude comes from a global catalogue (EMSC, or USGS as a fallback) — not " +
-                "PHIVOLCS — and can differ from PHIVOLCS by a tenth or two. Intensity is the " +
-                "shaking the SIREN sensor measured at the school.",
+                "PHIVOLCS — and can differ from PHIVOLCS by several tenths, especially in the " +
+                "first hours. Intensity is the shaking the SIREN sensor measured at the school.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.fillMaxWidth(),

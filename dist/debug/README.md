@@ -16,7 +16,14 @@ named `SIREN-v<version>-debug.apk`.
 
 | File | Version | Size | Built |
 |---|---|---|---|
-| `SIREN-v3.1.0-debug.apk` | 3.1.0 (versionCode 11) | 25.9 MB | 25 Sep 2026 |
+| `SIREN-v3.1.1-debug.apk` | 3.1.1 (versionCode 12) | 25.8 MB | 25 Sep 2026 |
+
+**3.1.1 fixes how Recent earthquakes names places**, after comparing it with PHIVOLCS's
+bulletin. EMSC filed an M4.2 eleven kilometres from Bogo under "Leyte, Philippines"; any
+event within 50 km of the sensor is now titled "Near Bogo · 12 km", every row shows
+coordinates, and the notes say magnitudes can differ from PHIVOLCS by several tenths (4.6
+vs 4.2 for that event), not "a tenth or two". Same debug key as 3.1.0, so it **installs
+over 3.1.0 without uninstalling**. 16 host tests pass.
 
 **3.1.0 is the second-phase features, Next phase 1–4** — details in CLAUDE.md:
 
@@ -48,7 +55,7 @@ byte-identical.
 
 Verified in the artifact, 25 Sep 2026:
 
-- `versionCode 11`, `versionName 3.1.0`, label `SIREN`
+- `versionCode 11`, `versionName 3.1.0`, label `SIREN` (3.1.1: `versionCode 12`, same checks re-run)
 - 28 `ic_sg_*` pictograms and 5 Inter weights under `assets/composeResources/`
 - `res/raw/siren_alarm.mp3` at 139,695 bytes
 - `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION` in the merged manifest, and **no**
